@@ -48,6 +48,45 @@
 为每个阶段：
 - 选择合适的智能体
 - 准备输入数据
+- **执行质量门禁检查**（见下方）
+
+---
+
+## ⚠️ 质量门禁检查（重要）
+
+每个阶段完成后，必须执行质量门禁检查：
+
+### 检查命令
+```bash
+python3 scripts/quality_gate.py --project {project} --stage {stage}
+```
+
+### 检查标准
+
+| 阶段 | 最低得分 | 必需文件 |
+|------|----------|----------|
+| requirement | 90% | 用户需求文档.md, 软件需求规格说明书.md |
+| design | 85% | 架构设计文档.md |
+| development | 80% | backend/package.json, frontend/package.json |
+| testing | 80% | 测试报告.md |
+| deployment | 85% | docker-compose.yml |
+| operations | 80% | README.md |
+| monitor | 80% | quality-report.md |
+| optimizer | 75% | optimization-plan.md |
+
+### 门禁流程
+```
+1. 智能体完成任务
+2. 执行质量门禁检查
+3. 得分 >= 最低要求 → 进入下一阶段
+4. 得分 < 最低要求 → 反馈问题，要求修复
+```
+
+### 不达标处理
+如果质量门禁不通过：
+1. 记录问题到日志
+2. 将问题写入 input/tickets/
+3. 重新执行当前阶段或通知人工介入
 - 设置质量阈值
 - 定义完成标准
 
