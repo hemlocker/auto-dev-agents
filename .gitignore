@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.pyo
+.pyd
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temp files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Node
+.npm/
+.npmrc
+
+# Python
+venv/
+.venv/
+pip-log.txt
+
+# OpenClaw sessions (sensitive)
+.agents/
+sessions/
+
+# Large files
+*.zip
+*.tar.gz
+*.rar
+
+# Test coverage
+coverage/
+.coverage
+htmlcov/
+
+# Compiled
+*.class
+*.exe
+*.dll

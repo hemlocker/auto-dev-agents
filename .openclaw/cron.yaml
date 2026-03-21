@@ -1,0 +1,49 @@
+# OpenClaw Cron Jobs Configuration
+# 全自动开发智能体系统 - 基于 OpenClaw 平台
+
+version: "1.0"
+
+config:
+  timezone: "Asia/Shanghai"
+  max_retries: 3
+  retry_delay: 300
+
+jobs:
+  # ========== PDCA 主循环 ==========
+  - id: "pdca_cycle"
+    name: "PDCA 开发循环"
+    description: "定时触发 PDCA 循环的下一阶段"
+    schedule: "*/30 * * * *"  # 每 30 分钟检查一次
+    type: "workflow"
+    
+    workflow:
+      # 执行 Python 脚本获取下一阶段任务
+      command: "python3 scripts/pdca_workflow.py --project demo_project --next"
+      
+      # 项目目录
+      cwd: "/root/.openclaw/workspace/projects/auto-dev-agents"
+      
+      # 成功后，在 OpenClaw 会话中执行返回的 sessions_spawn 任务
+      # 这需要 OpenClaw 的支持：解析输出并执行
+    
+  # ========== 需求收集任务 ==========
+  - id: "collect_feedback"
+    name: "收集用户反馈"
+    description: "从输入目录收集新的需求和反馈"
+    schedule: "0 */2 * * *"  # 每 2 小时
+    type: "workflow"
+    
+    workflow:
+      command: "ls -la projects/demo_project/input/"
+      cwd: "/root/.openclaw/workspace/projects/auto-dev-agents"
+      
+  # ========== 监控检查任务 ==========
+  - id: "health_check"
+    name: "健康检查"
+    description: "检查系统运行状态"
+    schedule: "0 * * * *"  # 每小时
+    type: "workflow"
+    
+    workflow:
+      command: "python3 scripts/pdca_workflow.py --project demo_project --status"
+      cwd: "/root/.openclaw/workspace/projects/auto-dev-agents"

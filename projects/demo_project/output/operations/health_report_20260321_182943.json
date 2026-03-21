@@ -1,0 +1,11 @@
+{
+    "timestamp": "2026-03-21T18:29:43+08:00",
+    "hostname": "DXP4800PLUS-A14",
+    "summary": {
+        "passed": 4,
+        "failed": 7,
+        "warning": 1,
+        "total": 12
+    },
+    "status": "unhealthy"
+}

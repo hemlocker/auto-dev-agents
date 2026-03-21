@@ -1,0 +1,47 @@
+# 全自动开发智能体系统配置
+# 基于 OpenClaw 平台 - 真正的全自动
+
+version: "2.0"
+
+# 项目配置
+projects:
+  dir: "projects"
+  default: "demo_project"
+
+# PDCA 循环配置
+pdca:
+  # 循环间隔（秒）
+  cycle_interval_seconds: 300  # 5 分钟
+  
+  # 自动循环
+  auto_loop: true
+  
+  # 最大循环次数（0 = 无限）
+  max_cycles: 0
+
+# 执行模式
+execution:
+  # 自动执行模式：无需对话
+  mode: "auto"
+  
+  # 阶段延迟（秒）
+  stage_delay_seconds: 60  # 1 分钟
+  
+  # 超时（秒）
+  timeout_seconds: 1800  # 30 分钟
+
+# 反馈机制
+feedback:
+  # 问题自动转工单
+  issues_to_tickets: true
+  
+  # 优化建议自动转需求
+  suggestions_to_requirements: true
+
+# 通知配置（仅在关键节点通知）
+notification:
+  channel: "feishu"
+  events:
+    - on_cycle_complete      # 每轮完成
+    - on_error               # 出错时
+    - on_new_issues          # 发现新问题

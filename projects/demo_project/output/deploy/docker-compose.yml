@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # 前端服务
+  frontend:
+    build:
+      context: ../src
+      dockerfile: ../../deploy/Dockerfile.frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+  # 后端服务
+  backend:
+    build:
+      context: ../src
+      dockerfile: ../../deploy/Dockerfile.backend
+    expose:
+      - "3000"
+    volumes:
+      - db-data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  db-data:
