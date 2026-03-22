@@ -134,15 +134,20 @@ python3 scripts/create_project.py --name my_project --goal "订单管理系统"
 vim projects/my_project/input/feedback/project_goal.md
 ```
 
-### 3. 在 OpenClaw 中运行
+### 3. 运行工作流
 
-在 OpenClaw 会话中直接调用：
+**方式 1：命令行运行**
+```bash
+# 运行需求分析阶段
+python3 scripts/run_workflow.py --project my_project --stages requirement
 
+# 运行完整工作流
+python3 scripts/run_workflow.py --project my_project
 ```
-运行 projects/my_project 的需求分析阶段
-```
 
-或者使用 sessions_spawn 创建子会话：
+**方式 2：OpenClaw 子会话**
+
+在 OpenClaw 中使用 sessions_spawn 创建子会话运行智能体任务：
 
 ```
 用 sessions_spawn 运行需求分析智能体，任务：分析 projects/my_project 的需求
