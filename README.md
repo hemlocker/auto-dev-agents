@@ -78,24 +78,11 @@ auto-dev-agents/
 │   ├── checklists/          # 检查清单
 │   └── templates/           # 文档模板
 │
-├── projects/                 # 项目目录（支持多项目）
-│   └── demo_project/        # 示例项目
+├── projects/                 # 项目目录（运行时创建，已加入 gitignore）
+│   └── {project_name}/      # 按项目名称创建
 │       ├── project.json     # 项目配置
 │       ├── input/           # 项目输入
-│       │   ├── feedback/    # 用户反馈
-│       │   ├── meetings/    # 会议记录
-│       │   ├── emails/      # 邮件
-│       │   └── tickets/     # 工单/任务单
-│       ├── output/          # 项目输出
-│       │   ├── requirements/
-│       │   ├── design/
-│       │   ├── src/
-│       │   ├── tests/
-│       │   ├── deploy/
-│       │   ├── operations/
-│       │   ├── monitor/
-│       │   └── optimizer/
-│       └── logs/            # 项目日志
+│       └── output/          # 项目输出
 │
 ├── scripts/                  # 脚本工具
 │   ├── create_project.py    # 创建项目
@@ -216,10 +203,10 @@ vim projects/order_system/input/feedback/project_goal.md
 
 ```bash
 # 查看项目配置
-cat projects/demo_project/project.json
+cat projects/{project_name}/project.json
 
 # 查看输出
-ls -la projects/demo_project/output/
+ls -la projects/{project_name}/output/
 ```
 
 ---
@@ -233,7 +220,7 @@ version: "2.0"
 
 projects:
   dir: "projects"
-  default: "demo_project"
+  default: ""  # 首次使用需创建项目
 
 workflow:
   stages:
@@ -280,5 +267,5 @@ openclaw:
 
 ---
 
-**版本：** v.0.1.1
+**版本：** v0.1.1
 **架构：** 基于 OpenClaw 平台
