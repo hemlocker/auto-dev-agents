@@ -87,6 +87,7 @@ auto-dev-agents/
 ├── scripts/                  # 脚本工具
 │   ├── create_project.py      # 创建项目
 │   ├── workflow.py            # 工作流执行器（统一入口）
+│   ├── state_manager.py       # 统一状态管理器
 │   ├── input_monitor.py       # 输入监控
 │   ├── quality_gate.py        # 质量门禁
 │   ├── ticket_dedup.py        # 工单去重
@@ -235,7 +236,51 @@ python3 scripts/workflow.py -p <项目名> --reset
 
 ---
 
-### 3. input_monitor.py - 输入监控
+### 3. state_manager.py - 统一状态管理器
+
+为智能体协作提供统一的状态管理，是协作能力改进的基础。
+
+```bash
+# 查看状态摘要
+python3 scripts/state_manager.py -p <项目名> --summary
+
+# 查看完整状态
+python3 scripts/state_manager.py -p <项目名> --status
+
+# 查看事件日志
+python3 scripts/state_manager.py -p <项目名> --events
+
+# 查看决策记录
+python3 scripts/state_manager.py -p <项目名> --decisions
+
+# 查看待处理反馈
+python3 scripts/state_manager.py -p <项目名> --feedback
+
+# 重置状态
+python3 scripts/state_manager.py -p <项目名> --reset
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--project, -p` | 项目名称（必填） |
+| `--status, -s` | 查看完整状态 |
+| `--summary` | 查看状态摘要 |
+| `--events, -e` | 查看事件日志 |
+| `--decisions, -d` | 查看决策记录 |
+| `--feedback, -f` | 查看待处理反馈 |
+| `--reset` | 重置状态 |
+
+**核心功能：**
+- 单一状态源（Single Source of Truth）
+- 状态变更追踪和历史版本
+- 事件日志记录
+- 智能体状态管理
+- 反馈系统
+- 决策记录
+
+---
+
+### 4. input_monitor.py - 输入监控
 
 监控项目输入目录，检测变化自动触发工作流。
 
@@ -263,7 +308,7 @@ python3 scripts/input_monitor.py -p <项目名> --start --interval 60
 
 ---
 
-### 4. quality_gate.py - 质量门禁
+### 5. quality_gate.py - 质量门禁
 
 检查各阶段输出是否达到质量标准。
 
@@ -292,7 +337,7 @@ python3 scripts/quality_gate.py -p <项目名> --stage requirement
 
 ---
 
-### 5. ticket_dedup.py - 工单去重
+### 6. ticket_dedup.py - 工单去重
 
 扫描工单目录，识别并合并重复问题。
 
@@ -309,7 +354,7 @@ python3 scripts/ticket_dedup.py -p <项目名> --threshold 0.5
 
 ---
 
-### 6. incremental_update.py - 增量更新
+### 7. incremental_update.py - 增量更新
 
 检测输入变化，只处理受影响的阶段。
 
