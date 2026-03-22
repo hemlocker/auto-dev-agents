@@ -168,6 +168,171 @@ python3 scripts/workflow.py --project my_project --start
 
 ---
 
+## 🔧 脚本工具详解
+
+### 1. create_project.py - 创建项目
+
+```bash
+python3 scripts/create_project.py --name <项目名> --goal "<项目目标>"
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--name, -n` | 项目名称（必填） |
+| `--goal, -g` | 项目目标（必填） |
+
+**输出：** 创建 `projects/{项目名}/` 目录结构
+
+---
+
+### 2. workflow.py - 工作流执行器（核心）
+
+统一的工作流管理入口，支持多种执行模式。
+
+```bash
+# 查看状态
+python3 scripts/workflow.py -p <项目名> --status
+
+# 单步执行（PDCA 模式）
+python3 scripts/workflow.py -p <项目名> --next
+
+# 指定阶段执行
+python3 scripts/workflow.py -p <项目名> --stages requirement,design
+
+# 完整 PDCA 循环
+python3 scripts/workflow.py -p <项目名> --full-cycle
+
+# 持续自动执行
+python3 scripts/workflow.py -p <项目名> --start
+
+# 暂停/恢复
+python3 scripts/workflow.py -p <项目名> --pause
+python3 scripts/workflow.py -p <项目名> --resume
+
+# 重置状态
+python3 scripts/workflow.py -p <项目名> --reset
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--project, -p` | 项目名称（必填） |
+| `--status, -s` | 查看当前状态 |
+| `--next, -n` | 执行下一阶段 |
+| `--stages` | 指定阶段（逗号分隔） |
+| `--full-cycle, -f` | 执行完整 PDCA 循环 |
+| `--start` | 启动持续自动执行 |
+| `--pause` | 暂停工作流 |
+| `--resume` | 恢复工作流 |
+| `--reset` | 重置状态 |
+
+**PDCA 阶段映射：**
+| Phase | 阶段 |
+|-------|------|
+| Plan | requirement, design |
+| Do | development, testing, deployment |
+| Check | operations, monitor |
+| Act | optimizer |
+
+---
+
+### 3. input_monitor.py - 输入监控
+
+监控项目输入目录，检测变化自动触发工作流。
+
+```bash
+# 启动持续监控
+python3 scripts/input_monitor.py -p <项目名> --start
+
+# 检查一次变化
+python3 scripts/input_monitor.py -p <项目名> --check
+
+# 查看状态
+python3 scripts/input_monitor.py -p <项目名> --status
+
+# 指定检查间隔
+python3 scripts/input_monitor.py -p <项目名> --start --interval 60
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--project, -p` | 项目名称（必填） |
+| `--start` | 启动持续监控 |
+| `--check, -c` | 检查一次变化 |
+| `--status, -s` | 查看状态 |
+| `--interval, -i` | 检查间隔（秒，默认 30） |
+
+---
+
+### 4. quality_gate.py - 质量门禁
+
+检查各阶段输出是否达到质量标准。
+
+```bash
+# 检查所有阶段
+python3 scripts/quality_gate.py -p <项目名> --all
+
+# 检查指定阶段
+python3 scripts/quality_gate.py -p <项目名> --stage requirement
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--project, -p` | 项目名称（必填） |
+| `--stage, -s` | 检查指定阶段 |
+| `--all, -a` | 检查所有阶段 |
+
+**质量标准：**
+| 阶段 | 必需文件 | 最低分数 |
+|------|----------|----------|
+| requirement | 用户需求文档.md, 软件需求规格说明书.md | 90% |
+| design | 架构设计文档.md | 85% |
+| development | package.json | 80% |
+| testing | 测试报告.md | 80% |
+| deployment | docker-compose.yml | 85% |
+
+---
+
+### 5. ticket_dedup.py - 工单去重
+
+扫描工单目录，识别并合并重复问题。
+
+```bash
+python3 scripts/ticket_dedup.py -p <项目名> --threshold 0.5
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--project, -p` | 项目名称（必填） |
+| `--threshold, -t` | 相似度阈值（0-1，默认 0.5） |
+
+**输出：** `output/optimizer/ticket-dedup-{时间戳}.md`
+
+---
+
+### 6. incremental_update.py - 增量更新
+
+检测输入变化，只处理受影响的阶段。
+
+```bash
+# 分析变化
+python3 scripts/incremental_update.py -p <项目名> --analyze
+
+# 标记阶段完成
+python3 scripts/incremental_update.py -p <项目名> --complete requirement
+
+# 重置状态
+python3 scripts/incremental_update.py -p <项目名> --reset
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--project, -p` | 项目名称（必填） |
+| `--analyze, -a` | 分析输入变化 |
+| `--complete` | 标记阶段完成 |
+| `--reset` | 重置状态 |
+
+---
+
 ## 🔧 与 OpenClaw 集成
 
 ### 使用 OpenClaw 会话能力
