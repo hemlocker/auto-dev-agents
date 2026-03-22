@@ -88,14 +88,30 @@
 - [x] 智能体状态管理
 - [x] 反馈系统
 - [x] 决策记录
-- [ ] 与 workflow.py 完全集成
+- [x] 与 workflow.py 完全集成
 ```
 
 **实现文件**: `scripts/state_manager.py` ✅
 
 ---
 
-#### 2. 错误恢复与自愈
+#### 2. 增强上下文传递
+
+```markdown
+- [x] 实现上下文管理器 (context_manager.py)
+- [x] 阶段专属上下文生成
+- [x] 相关决策自动过滤
+- [x] 上游输出摘要传递
+- [x] 输入文件自动发现
+- [x] 输出要求规范化
+- [x] 与 workflow.py 集成
+```
+
+**实现文件**: `scripts/context_manager.py` ✅
+
+---
+
+#### 3. 错误恢复与自愈
 
 ```markdown
 - [ ] 实现执行失败自动重试机制

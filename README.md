@@ -88,6 +88,7 @@ auto-dev-agents/
 │   ├── create_project.py      # 创建项目
 │   ├── workflow.py            # 工作流执行器（统一入口）
 │   ├── state_manager.py       # 统一状态管理器
+│   ├── context_manager.py     # 上下文管理器
 │   ├── input_monitor.py       # 输入监控
 │   ├── quality_gate.py        # 质量门禁
 │   ├── ticket_dedup.py        # 工单去重
@@ -280,7 +281,39 @@ python3 scripts/state_manager.py -p <项目名> --reset
 
 ---
 
-### 4. input_monitor.py - 输入监控
+### 4. context_manager.py - 上下文管理器
+
+为智能体提供增强的上下文传递能力。
+
+```bash
+# 查看阶段上下文摘要
+python3 scripts/context_manager.py -p <项目名> -s design --summary
+
+# 生成完整任务提示词
+python3 scripts/context_manager.py -p <项目名> -s design --prompt
+
+# 提取输出摘要
+python3 scripts/context_manager.py -p <项目名> -s requirement --extract
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--project, -p` | 项目名称（必填） |
+| `--stage, -s` | 阶段名称（必填） |
+| `--summary` | 查看上下文摘要 |
+| `--prompt` | 生成完整提示词 |
+| `--extract` | 提取输出摘要 |
+
+**核心功能：**
+- 阶段专属上下文生成
+- 相关决策自动过滤
+- 上游输出摘要传递
+- 输入文件自动发现
+- 输出要求规范化
+
+---
+
+### 5. input_monitor.py - 输入监控
 
 监控项目输入目录，检测变化自动触发工作流。
 
@@ -308,7 +341,7 @@ python3 scripts/input_monitor.py -p <项目名> --start --interval 60
 
 ---
 
-### 5. quality_gate.py - 质量门禁
+### 6. quality_gate.py - 质量门禁
 
 检查各阶段输出是否达到质量标准。
 
@@ -337,7 +370,7 @@ python3 scripts/quality_gate.py -p <项目名> --stage requirement
 
 ---
 
-### 6. ticket_dedup.py - 工单去重
+### 7. ticket_dedup.py - 工单去重
 
 扫描工单目录，识别并合并重复问题。
 
@@ -354,7 +387,7 @@ python3 scripts/ticket_dedup.py -p <项目名> --threshold 0.5
 
 ---
 
-### 7. incremental_update.py - 增量更新
+### 8. incremental_update.py - 增量更新
 
 检测输入变化，只处理受影响的阶段。
 
