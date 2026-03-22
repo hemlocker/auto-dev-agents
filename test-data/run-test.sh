@@ -7,8 +7,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECTS_DIR="$(dirname "$SCRIPT_DIR")/projects"
 
-# 默认项目名
-PROJECT_NAME="${2:-test-device-management}"
+# 获取当前分支版本号
+get_version() {
+    cd "$(dirname "$SCRIPT_DIR")"
+    git branch --show-current 2>/dev/null || echo "dev"
+}
+
+# 默认项目名（短格式：tdm-{版本号}）
+DEFAULT_VERSION=$(get_version)
+DEFAULT_NAME="tdm-${DEFAULT_VERSION}"
+PROJECT_NAME="${2:-$DEFAULT_NAME}"
 
 # 显示帮助
 show_help() {
@@ -22,9 +30,11 @@ show_help() {
     echo "  3  - 阶段3：问题反馈（优化修复）"
     echo "  all - 运行所有阶段"
     echo ""
+    echo "默认项目名: $DEFAULT_NAME"
+    echo ""
     echo "示例:"
-    echo "  $0 1                    # 运行阶段1测试"
-    echo "  $0 2 my-project         # 运行阶段2测试"
+    echo "  $0 1                    # 运行阶段1测试 (项目: $DEFAULT_NAME)"
+    echo "  $0 2 my-project         # 运行阶段2测试 (项目: my-project)"
     echo "  $0 all                  # 运行所有阶段测试"
 }
 
@@ -32,6 +42,7 @@ show_help() {
 run_stage1() {
     echo "=========================================="
     echo "阶段1：初始需求测试"
+    echo "项目名: $PROJECT_NAME"
     echo "=========================================="
     
     # 清理旧项目
@@ -55,6 +66,7 @@ run_stage1() {
 run_stage2() {
     echo "=========================================="
     echo "阶段2：功能扩展测试"
+    echo "项目名: $PROJECT_NAME"
     echo "=========================================="
     
     if [ ! -d "$PROJECTS_DIR/$PROJECT_NAME" ]; then
@@ -75,6 +87,7 @@ run_stage2() {
 run_stage3() {
     echo "=========================================="
     echo "阶段3：问题反馈测试"
+    echo "项目名: $PROJECT_NAME"
     echo "=========================================="
     
     if [ ! -d "$PROJECTS_DIR/$PROJECT_NAME" ]; then
