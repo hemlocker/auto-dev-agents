@@ -86,7 +86,7 @@ auto-dev-agents/
 │
 ├── scripts/                  # 脚本工具
 │   ├── create_project.py      # 创建项目
-│   ├── workflow_executor.py   # 工作流执行器（统一入口）
+│   ├── workflow.py            # 工作流执行器（统一入口）
 │   ├── input_monitor.py       # 输入监控
 │   ├── quality_gate.py        # 质量门禁
 │   ├── ticket_dedup.py        # 工单去重
@@ -143,19 +143,19 @@ vim projects/my_project/input/feedback/project_goal.md
 **方式 1：命令行运行**
 ```bash
 # 查看状态
-python3 scripts/workflow_executor.py --project my_project --status
+python3 scripts/workflow.py --project my_project --status
 
 # 执行下一阶段
-python3 scripts/workflow_executor.py --project my_project --next
+python3 scripts/workflow.py --project my_project --next
 
 # 执行指定阶段
-python3 scripts/workflow_executor.py --project my_project --stages requirement,design
+python3 scripts/workflow.py --project my_project --stages requirement,design
 
 # 执行完整 PDCA 循环
-python3 scripts/workflow_executor.py --project my_project --full-cycle
+python3 scripts/workflow.py --project my_project --full-cycle
 
 # 启动持续自动执行
-python3 scripts/workflow_executor.py --project my_project --start
+python3 scripts/workflow.py --project my_project --start
 ```
 
 **方式 2：OpenClaw 子会话**
