@@ -67,3 +67,6 @@ htmlcov/
 *.class
 *.exe
 *.dll
+
+# Demo projects (output only)
+projects/
