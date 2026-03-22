@@ -1,0 +1,51 @@
+{
+  "name": "demo_project_tests",
+  "version": "1.0.0",
+  "description": "测试套件 - 设备管理系统",
+  "scripts": {
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "jest --config tests/backend/jest.config.js --verbose",
+    "test:frontend": "vitest run --config tests/frontend/vitest.config.js",
+    "test:backend:watch": "jest --config tests/backend/jest.config.js --watch",
+    "test:frontend:watch": "vitest --config tests/frontend/vitest.config.js",
+    "test:backend:coverage": "jest --config tests/backend/jest.config.js --coverage",
+    "test:frontend:coverage": "vitest run --config tests/frontend/vitest.config.js --coverage",
+    "test:api": "jest --config tests/backend/jest.config.js tests/backend/deviceRoutes.test.js",
+    "test:controller": "jest --config tests/backend/jest.config.js tests/backend/deviceController.test.js",
+    "test:model": "jest --config tests/backend/jest.config.js tests/backend/deviceModel.test.js"
+  },
+  "keywords": [
+    "test",
+    "jest",
+    "vitest",
+    "vue",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "@vitest/coverage-v8": "^1.0.0",
+    "@vue/test-utils": "^2.4.0",
+    "jest": "^29.7.0",
+    "jest-environment-node": "^29.7.0",
+    "jsdom": "^24.0.0",
+    "moment": "^2.30.1",
+    "pdfkit": "^0.18.0",
+    "supertest": "^6.3.3",
+    "vite": "^5.0.0",
+    "vitest": "^1.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "element-plus": "^2.5.0",
+    "express": "^4.18.2",
+    "pinia": "^2.1.7",
+    "sequelize": "^6.35.0",
+    "sqlite3": "^5.1.6",
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.5"
+  }
+}
