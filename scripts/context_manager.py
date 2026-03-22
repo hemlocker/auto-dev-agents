@@ -30,7 +30,12 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
-from .state_manager import StateManager
+
+# 使用绝对导入
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+
+from state_manager import StateManager
 
 
 class ContextManager:
@@ -466,11 +471,18 @@ class ContextManager:
     
     def _get_input_directories(self, stage: str) -> List[str]:
         """获取阶段的输入目录"""
-        from scripts.workflow import WorkflowExecutor
-        
-        input_map = WorkflowExecutor.INPUT_MAP
+        # 直接定义输入映射，避免循环导入
+        input_map = {
+            "requirement": "input/",
+            "design": "output/requirements/",
+            "development": "output/design/",
+            "testing": "output/src/",
+            "deployment": "output/tests/",
+            "operations": "output/deploy/",
+            "monitor": "output/",
+            "optimizer": "output/monitor/"
+        }
         input_dir = input_map.get(stage, "input/")
-        
         return [str(self.project_dir / input_dir)]
     
     def _get_output_requirements(self, stage: str) -> dict:
@@ -671,8 +683,17 @@ class ContextManager:
     
     def _get_output_dir(self, stage: str) -> Path:
         """获取阶段输出目录"""
-        from scripts.workflow import WorkflowExecutor
-        output_map = WorkflowExecutor.OUTPUT_MAP
+        # 直接定义输出映射，避免循环导入
+        output_map = {
+            "requirement": "output/requirements/",
+            "design": "output/design/",
+            "development": "output/src/",
+            "testing": "output/tests/",
+            "deployment": "output/deploy/",
+            "operations": "output/operations/",
+            "monitor": "output/monitor/",
+            "optimizer": "output/optimizer/"
+        }
         output_dir = output_map.get(stage, f"output/{stage}/")
         return self.project_dir / output_dir
     
