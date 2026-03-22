@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+工作流执行器
+Workflow Executor
+
+统一的开发工作流执行器，整合了：
+- run_workflow.py: 指定阶段运行
+- pdca_workflow.py: PDCA 循环调度
+- auto_executor.py: 自动循环执行
+
+使用方式：
+  # 查看状态
+  python3 scripts/workflow_executor.py --project my_project --status
+
+  # 单步执行下一阶段
+  python3 scripts/workflow_executor.py --project my_project --next
+
+  # 指定阶段运行
+  python3 scripts/workflow_executor.py --project my_project --stages requirement,design
+
+  # 运行完整 PDCA 循环
+  python3 scripts/workflow_executor.py --project my_project --full-cycle
+
+  # 启动持续自动执行
+  python3 scripts/workflow_executor.py --project my_project --start
+
+  # 暂停/恢复
+  python3 scripts/workflow_executor.py --project my_project --pause
+  python3 scripts/workflow_executor.py --project my_project --resume
+"""
+
+import argparse
+import json
+import re
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Dict, List, Tuple
+
+
+class WorkflowExecutor:
+    """工作流执行器 - 统一的 PDCA 工作流管理"""
+
+    # PDCA 阶段映射
+    PHASE_ORDER = ["plan", "do", "check", "act"]
+    STAGE_MAP = {
+        "plan": ["requirement", "design"],
+        "do": ["development", "testing", "deployment"],
+        "check": ["operations", "monitor"],
+        "act": ["optimizer"]
+    }
+
+    # 所有阶段列表（用于非 PDCA 模式）
+    ALL_STAGES = ["requirement", "design", "development", "testing",
+                  "deployment", "operations", "monitor", "optimizer"]
+
+    # 输入输出映射
+    INPUT_MAP = {
+        "requirement": "input/",
+        "design": "output/requirements/",
+        "development": "output/design/",
+        "testing": "output/src/",
+        "deployment": "output/tests/",
+        "operations": "output/deploy/",
+        "monitor": "output/",
+        "optimizer": "output/monitor/"
+    }
+
+    OUTPUT_MAP = {
+        "requirement": "output/requirements/",
+        "design": "output/design/",
+        "development": "output/src/",
+        "testing": "output/tests/",
+        "deployment": "output/deploy/",
+        "operations": "output/operations/",
+        "monitor": "output/monitor/",
+        "optimizer": "output/optimizer/"
+    }
+
+    def __init__(self, project_name: str, base_dir: str = None):
+        self.project_name = project_name
+        self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
+        self.project_dir = self.base_dir / "projects" / project_name
+        self.input_dir = self.project_dir / "input"
+        self.output_dir = self.project_dir / "output"
+        self.state_file = self.project_dir / "workflow_state.json"
+        self.log_file = self.project_dir / "logs" / "workflow.jsonl"
+        self.config = self._load_config()
+        self.running = True
+
+    # ==================== 配置与状态管理 ====================
+
+    def _load_config(self) -> dict:
+        """加载项目配置"""
+        config_path = self.base_dir / "config.yaml"
+        default_config = {
+            "pdca": {
+                "max_cycles": 0,  # 0 = 无限循环
+                "cycle_interval_seconds": 300
+            },
+            "execution": {
+                "stage_delay_seconds": 60,
+                "timeout_seconds": 1800
+            }
+        }
+
+        if not config_path.exists():
+            return default_config
+
+        try:
+            import yaml
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+                # 合并默认配置
+                for key in default_config:
+                    if key not in config:
+                        config[key] = default_config[key]
+                return config
+        except:
+            # 简单解析 YAML（避免依赖）
+            content = config_path.read_text()
+            config = default_config.copy()
+
+            for key in ["max_cycles", "cycle_interval_seconds"]:
+                match = re.search(rf"{key}:\s*(\d+)", content)
+                if match:
+                    config["pdca"][key] = int(match.group(1))
+
+            for key in ["stage_delay_seconds", "timeout_seconds"]:
+                match = re.search(rf"{key}:\s*(\d+)", content)
+                if match:
+                    config["execution"][key] = int(match.group(1))
+
+            return config
+
+    def _load_project_info(self) -> dict:
+        """加载项目信息"""
+        project_file = self.project_dir / "project.json"
+        if not project_file.exists():
+            return {"error": f"项目 '{self.project_name}' 不存在"}
+
+        with open(project_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _load_prompt(self, stage: str) -> str:
+        """加载阶段提示词"""
+        prompt_path = self.base_dir / "prompts" / stage / "system.md"
+        if prompt_path.exists():
+            return prompt_path.read_text(encoding="utf-8")
+        return f"你是 {stage} 智能体，请完成你的任务。"
+
+    def _read_state(self) -> dict:
+        """读取工作流状态"""
+        if self.state_file.exists():
+            try:
+                return json.loads(self.state_file.read_text(encoding="utf-8"))
+            except:
+                pass
+        return {
+            "cycle": 0,
+            "current_phase": None,
+            "current_stage": None,
+            "paused": False,
+            "history": []
+        }
+
+    def _save_state(self, state: dict):
+        """保存工作流状态"""
+        state["updated_at"] = datetime.now().isoformat()
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(
+            json.dumps(state, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
+
+    def _log_execution(self, phase: str, stage: str, spawn_config: dict):
+        """记录执行日志"""
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "cycle": self._read_state().get("cycle", 0),
+            "phase": phase,
+            "stage": stage,
+            "spawn_config": spawn_config
+        }
+        with open(self.log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
+    # ==================== 阶段管理 ====================
+
+    def _get_next_stage(self, state: dict) -> Tuple[Optional[str], Optional[str]]:
+        """获取下一阶段（PDCA 模式）"""
+        current_phase = state.get("current_phase")
+        current_stage = state.get("current_stage")
+
+        if current_phase is None:
+            state["cycle"] = state.get("cycle", 0) + 1
+            return "plan", "requirement"
+
+        phase_idx = self.PHASE_ORDER.index(current_phase)
+        stages = self.STAGE_MAP[current_phase]
+        stage_idx = stages.index(current_stage)
+
+        # 同一阶段下一任务
+        if stage_idx + 1 < len(stages):
+            return current_phase, stages[stage_idx + 1]
+
+        # 下一阶段
+        elif phase_idx + 1 < len(self.PHASE_ORDER):
+            next_phase = self.PHASE_ORDER[phase_idx + 1]
+            return next_phase, self.STAGE_MAP[next_phase][0]
+
+        # 循环完成
+        else:
+            state["history"].append({
+                "cycle": state["cycle"],
+                "completed_at": datetime.now().isoformat()
+            })
+
+            max_cycles = self.config["pdca"].get("max_cycles", 0)
+            if max_cycles == 0 or state["cycle"] < max_cycles:
+                state["cycle"] += 1
+                return "plan", "requirement"
+
+            return None, None
+
+    def _generate_spawn_config(self, stage: str, phase: str) -> dict:
+        """生成 sessions_spawn 配置"""
+        prompt = self._load_prompt(stage)
+        input_path = self.project_dir / self.INPUT_MAP.get(stage, "input/")
+        output_path = self.project_dir / self.OUTPUT_MAP.get(stage, "output/")
+
+        task = f"""# 项目: {self.project_name} | PDCA 阶段: {phase.upper()} | 智能体: {stage}
+
+## 系统提示词
+{prompt}
+
+## 输入目录
+{input_path}
+
+## 输出目录
+{output_path}
+
+## 任务
+请根据输入完成 {stage} 阶段的工作，结果写入输出目录。
+"""
+
+        return {
+            "action": "sessions_spawn",
+            "params": {
+                "runtime": "subagent",
+                "mode": "run",
+                "task": task,
+                "cwd": str(self.base_dir),
+                "timeoutSeconds": self.config["execution"].get("timeout_seconds", 1800),
+                "label": f"{self.project_name}_{phase}_{stage}"
+            },
+            "stage": stage,
+            "phase": phase,
+            "input_dir": str(input_path),
+            "output_dir": str(output_path)
+        }
+
+    # ==================== 执行模式 ====================
+
+    def execute_stage(self, stage: str, phase: str = None) -> dict:
+        """执行单个阶段"""
+        if phase is None:
+            # 根据 stage 推断 phase
+            for p, stages in self.STAGE_MAP.items():
+                if stage in stages:
+                    phase = p
+                    break
+            if phase is None:
+                phase = "custom"
+
+        spawn_config = self._generate_spawn_config(stage, phase)
+
+        print(f"\n{'='*60}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 执行阶段")
+        print(f"  PDCA: {phase.upper()}")
+        print(f"  智能体: {stage}")
+        print(f"  输入: {spawn_config['input_dir']}")
+        print(f"  输出: {spawn_config['output_dir']}")
+        print(f"{'='*60}")
+
+        self._log_execution(phase, stage, spawn_config)
+
+        return spawn_config
+
+    def execute_next(self) -> Optional[dict]:
+        """执行下一阶段（PDCA 模式）"""
+        state = self._read_state()
+
+        if state.get("paused"):
+            print("⏸️ 工作流已暂停")
+            return None
+
+        phase, stage = self._get_next_stage(state)
+
+        if phase is None:
+            print("✅ PDCA 循环已完成，已达最大循环次数")
+            return None
+
+        state["current_phase"] = phase
+        state["current_stage"] = stage
+        self._save_state(state)
+
+        return self.execute_stage(stage, phase)
+
+    def execute_stages(self, stages: List[str]) -> List[dict]:
+        """执行指定阶段列表"""
+        results = []
+        print(f"\n🚀 执行指定阶段: {', '.join(stages)}")
+
+        for stage in stages:
+            if stage not in self.ALL_STAGES:
+                print(f"⚠️ 未知阶段: {stage}，跳过")
+                continue
+
+            result = self.execute_stage(stage)
+            results.append(result)
+
+        return results
+
+    def execute_full_cycle(self) -> List[dict]:
+        """执行完整 PDCA 循环（一次性生成所有任务）"""
+        # 重置状态
+        self._save_state({
+            "cycle": 1,
+            "current_phase": None,
+            "current_stage": None,
+            "paused": False,
+            "history": []
+        })
+
+        results = []
+        print(f"\n🔄 执行完整 PDCA 循环")
+
+        for phase in self.PHASE_ORDER:
+            for stage in self.STAGE_MAP[phase]:
+                result = self.execute_stage(stage, phase)
+                results.append(result)
+
+                # 更新状态
+                state = self._read_state()
+                state["current_phase"] = phase
+                state["current_stage"] = stage
+                self._save_state(state)
+
+        # 标记完成
+        state = self._read_state()
+        state["history"].append({
+            "cycle": state["cycle"],
+            "completed_at": datetime.now().isoformat()
+        })
+        self._save_state(state)
+
+        print(f"\n✅ PDCA 循环完成，共 {len(results)} 个阶段")
+        return results
+
+    def run_continuous(self):
+        """持续运行（自动循环执行）"""
+        print(f"\n{'='*60}")
+        print(f"🚀 工作流自动执行器启动")
+        print(f"📁 项目: {self.project_name}")
+        print(f"📂 目录: {self.project_dir}")
+        print(f"{'='*60}\n")
+
+        project_info = self._load_project_info()
+        if "error" in project_info:
+            print(f"❌ {project_info['error']}")
+            return
+
+        print(f"🎯 目标: {project_info.get('goal', '未指定')}")
+
+        stage_delay = self.config["execution"].get("stage_delay_seconds", 60)
+
+        while self.running:
+            try:
+                state = self._read_state()
+
+                if state.get("paused"):
+                    print("⏸️ 已暂停，等待恢复...")
+                    time.sleep(10)
+                    continue
+
+                result = self.execute_next()
+
+                if result is None:
+                    print("\n👋 工作流执行完成")
+                    break
+
+                print(f"\n⏳ 等待 {stage_delay} 秒后继续...")
+                time.sleep(stage_delay)
+
+            except KeyboardInterrupt:
+                print("\n⏸️ 收到中断信号，停止执行")
+                self.running = False
+                break
+            except Exception as e:
+                print(f"❌ 错误: {e}")
+                time.sleep(60)
+
+        print("\n👋 执行器已停止")
+
+    # ==================== 控制命令 ====================
+
+    def pause(self):
+        """暂停工作流"""
+        state = self._read_state()
+        state["paused"] = True
+        self._save_state(state)
+        print("⏸️ 工作流已暂停")
+
+    def resume(self):
+        """恢复工作流"""
+        state = self._read_state()
+        state["paused"] = False
+        self._save_state(state)
+        print("▶️ 工作流已恢复")
+
+    def reset(self):
+        """重置工作流状态"""
+        self._save_state({
+            "cycle": 0,
+            "current_phase": None,
+            "current_stage": None,
+            "paused": False,
+            "history": []
+        })
+        print("🔄 工作流状态已重置")
+
+    def status(self) -> dict:
+        """获取工作流状态"""
+        state = self._read_state()
+        project_info = self._load_project_info()
+
+        return {
+            "project": self.project_name,
+            "project_dir": str(self.project_dir),
+            "goal": project_info.get("goal") if "error" not in project_info else None,
+            "cycle": state.get("cycle", 0),
+            "current_phase": state.get("current_phase"),
+            "current_stage": state.get("current_stage"),
+            "paused": state.get("paused", False),
+            "history_count": len(state.get("history", [])),
+            "config": {
+                "max_cycles": self.config["pdca"].get("max_cycles", 0),
+                "stage_delay": self.config["execution"].get("stage_delay_seconds", 60)
+            }
+        }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="工作流执行器 - 统一的 PDCA 工作流管理",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 查看状态
+  python3 scripts/workflow_executor.py -p my_project --status
+
+  # 单步执行
+  python3 scripts/workflow_executor.py -p my_project --next
+
+  # 指定阶段
+  python3 scripts/workflow_executor.py -p my_project --stages requirement,design
+
+  # 完整循环
+  python3 scripts/workflow_executor.py -p my_project --full-cycle
+
+  # 持续执行
+  python3 scripts/workflow_executor.py -p my_project --start
+
+  # 暂停/恢复
+  python3 scripts/workflow_executor.py -p my_project --pause
+  python3 scripts/workflow_executor.py -p my_project --resume
+        """
+    )
+
+    parser.add_argument("--project", "-p", required=True, help="项目名称")
+    parser.add_argument("--status", "-s", action="store_true", help="查看状态")
+    parser.add_argument("--next", "-n", action="store_true", help="执行下一阶段")
+    parser.add_argument("--stages", help="执行指定阶段（逗号分隔）")
+    parser.add_argument("--full-cycle", "-f", action="store_true", help="执行完整 PDCA 循环")
+    parser.add_argument("--start", action="store_true", help="启动持续自动执行")
+    parser.add_argument("--pause", action="store_true", help="暂停工作流")
+    parser.add_argument("--resume", action="store_true", help="恢复工作流")
+    parser.add_argument("--reset", action="store_true", help="重置状态")
+
+    args = parser.parse_args()
+
+    executor = WorkflowExecutor(project_name=args.project)
+
+    if args.status:
+        result = executor.status()
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    elif args.pause:
+        executor.pause()
+
+    elif args.resume:
+        executor.resume()
+
+    elif args.reset:
+        executor.reset()
+
+    elif args.stages:
+        stages = [s.strip() for s in args.stages.split(",")]
+        results = executor.execute_stages(stages)
+        print(f"\n📋 执行结果:")
+        for r in results:
+            print(f"  - [{r['phase'].upper()}] {r['stage']}")
+
+    elif args.full_cycle:
+        results = executor.execute_full_cycle()
+        print(f"\n📋 生成的任务配置:")
+        print(json.dumps([r["params"] for r in results], indent=2, ensure_ascii=False))
+
+    elif args.next:
+        result = executor.execute_next()
+        if result:
+            print(f"\n📋 sessions_spawn 配置:")
+            print(json.dumps(result["params"], indent=2, ensure_ascii=False))
+
+    elif args.start:
+        executor.run_continuous()
+
+    else:
+        # 默认显示状态
+        result = executor.status()
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    exit(main())
