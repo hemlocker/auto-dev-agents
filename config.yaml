@@ -8,6 +8,73 @@ projects:
   dir: "projects"
   default: "demo_project"
 
+# 工作流配置
+workflow:
+  # 预设模板: full-pdca | dev-only | test-only | custom
+  template: "full-pdca"
+  
+  # 阶段定义（template=custom 时生效）
+  stages:
+    - name: requirement
+      phase: plan
+      input: input/
+      output: output/requirements/
+      prompt: prompts/requirement/system.md
+      timeout: 1800
+      
+    - name: design
+      phase: plan
+      input: output/requirements/
+      output: output/design/
+      depends_on: [requirement]
+      
+    - name: development
+      phase: do
+      input: output/design/
+      output: output/src/
+      depends_on: [design]
+      
+    - name: testing
+      phase: do
+      input: output/src/
+      output: output/tests/
+      depends_on: [development]
+      
+    - name: deployment
+      phase: do
+      input: output/tests/
+      output: output/deploy/
+      depends_on: [testing]
+      
+    - name: operations
+      phase: check
+      input: output/deploy/
+      output: output/operations/
+      depends_on: [deployment]
+      
+    - name: monitor
+      phase: check
+      input: output/
+      output: output/monitor/
+      depends_on: [operations]
+      
+    - name: optimizer
+      phase: act
+      input: output/monitor/
+      output: output/optimizer/
+      depends_on: [monitor]
+  
+  # 预设模板定义
+  templates:
+    full-pdca:
+      stages: [requirement, design, development, testing, deployment, operations, monitor, optimizer]
+    dev-only:
+      stages: [requirement, design, development]
+    test-only:
+      stages: [development, testing]
+    plan-do:
+      stages: [requirement, design, development, testing, deployment]
+
 # PDCA 循环配置
 pdca:
   # 循环间隔（秒）

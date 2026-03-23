@@ -35,15 +35,52 @@ import json
 import re
 import time
 import subprocess
-import requests
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
+from dataclasses import dataclass, field
+
+# 延迟导入 requests，如果不可用则使用 subprocess + curl
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 
 # Gateway HTTP API 配置
 GATEWAY_URL = "http://127.0.0.1:18799"
 GATEWAY_TOKEN = None  # 从环境变量或配置读取
+
+
+# ==================== 数据类定义 ====================
+
+@dataclass
+class StageConfig:
+    """阶段配置"""
+    name: str
+    phase: str = "custom"
+    input_dir: str = None
+    output_dir: str = None
+    prompt: str = None
+    depends_on: List[str] = field(default_factory=list)
+    skip: bool = False
+    timeout: int = 1800
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'StageConfig':
+        """从字典创建"""
+        return cls(
+            name=data.get("name"),
+            phase=data.get("phase", "custom"),
+            input_dir=data.get("input"),
+            output_dir=data.get("output"),
+            prompt=data.get("prompt"),
+            depends_on=data.get("depends_on", []),
+            skip=data.get("skip", False),
+            timeout=data.get("timeout", 1800)
+        )
 
 
 # ==================== 自定义异常 ====================
@@ -77,6 +114,43 @@ class DependencyError(WorkflowError):
         super().__init__(f"[{stage}] 缺少前置输入: {missing_input}")
 
 
+# ==================== HTTP 辅助函数 ====================
+
+def http_post(url: str, headers: dict, payload: dict, timeout: int = 30) -> dict:
+    """发送 HTTP POST 请求（优先使用 requests，否则使用 curl）"""
+    if HAS_REQUESTS:
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            return {"status_code": response.status_code, "text": response.text, "json": response.json() if response.text else None}
+        except Exception as e:
+            return {"error": str(e)}
+    else:
+        # 使用 curl
+        import tempfile
+        header_args = []
+        for k, v in headers.items():
+            header_args.extend(["-H", f"{k}: {v}"])
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(payload, f)
+            payload_file = f.name
+        
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-X", "POST", url] + header_args + ["-d", f"@{payload_file}", "--connect-timeout", str(timeout)],
+                capture_output=True, text=True, timeout=timeout + 5
+            )
+            response_text = result.stdout
+            try:
+                return {"status_code": 200, "text": response_text, "json": json.loads(response_text) if response_text else None}
+            except:
+                return {"status_code": 500, "text": response_text}
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            os.unlink(payload_file)
+
+
 class SubagentExecutor:
     """子智能体执行器 - 通过 OpenClaw Gateway HTTP API 执行"""
 
@@ -85,12 +159,7 @@ class SubagentExecutor:
         self.gateway_token = gateway_token or GATEWAY_TOKEN
 
     def spawn(self, task: str, cwd: str, label: str, timeout_seconds: int = 1800) -> dict:
-        """
-        通过 Gateway HTTP API 启动子智能体
-
-        Returns:
-            dict: 包含 session_key 和 status 的结果
-        """
+        """通过 Gateway HTTP API 启动子智能体"""
         headers = {"Content-Type": "application/json"}
         if self.gateway_token:
             headers["Authorization"] = f"Bearer {self.gateway_token}"
@@ -107,34 +176,23 @@ class SubagentExecutor:
             }
         }
 
-        try:
-            response = requests.post(
-                f"{self.gateway_url}/tools/invoke",
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
+        result = http_post(
+            f"{self.gateway_url}/tools/invoke",
+            headers,
+            payload,
+            timeout=30
+        )
 
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                # sessions_spawn 未在允许列表
-                return {
-                    "ok": False,
-                    "error": "sessions_spawn 被 Gateway 禁用，请配置 gateway.tools.allow"
-                }
-            else:
-                return {
-                    "ok": False,
-                    "error": f"HTTP {response.status_code}: {response.text}"
-                }
-        except requests.exceptions.ConnectionError:
-            return {
-                "ok": False,
-                "error": "无法连接 Gateway，请确保 Gateway 正在运行"
-            }
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        if "error" in result:
+            return {"ok": False, "error": result["error"]}
+        
+        status_code = result.get("status_code", 500)
+        if status_code == 200:
+            return result.get("json", {"ok": True})
+        elif status_code == 404:
+            return {"ok": False, "error": "sessions_spawn 被 Gateway 禁用，请配置 gateway.tools.allow"}
+        else:
+            return {"ok": False, "error": f"HTTP {status_code}: {result.get('text', '')}"}
 
     def check_status(self, session_key: str) -> dict:
         """检查子智能体状态"""
@@ -147,68 +205,46 @@ class SubagentExecutor:
             "args": {"action": "list"}
         }
 
-        try:
-            response = requests.post(
-                f"{self.gateway_url}/tools/invoke",
-                headers=headers,
-                json=payload,
-                timeout=10
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("ok") and data.get("result"):
-                    for sub in data["result"].get("active", []):
-                        if sub.get("sessionKey") == session_key:
-                            return {"running": True, "info": sub}
-                    for sub in data["result"].get("recent", []):
-                        if sub.get("sessionKey") == session_key:
-                            return {"running": False, "info": sub}
-                return {"running": False, "info": None}
-            return {"running": False, "error": response.text}
-        except Exception as e:
-            return {"running": False, "error": str(e)}
+        result = http_post(
+            f"{self.gateway_url}/tools/invoke",
+            headers,
+            payload,
+            timeout=10
+        )
+
+        if "error" in result:
+            return {"running": False, "error": result["error"]}
+        
+        if result.get("status_code") == 200:
+            data = result.get("json", {})
+            if data.get("ok") and data.get("result"):
+                for sub in data["result"].get("active", []):
+                    if sub.get("sessionKey") == session_key:
+                        return {"running": True, "info": sub}
+                for sub in data["result"].get("recent", []):
+                    if sub.get("sessionKey") == session_key:
+                        return {"running": False, "info": sub}
+            return {"running": False, "info": None}
+        return {"running": False, "error": result.get("text", "Unknown error")}
 
 
 class WorkflowExecutor:
     """工作流执行器 - 统一的 PDCA 工作流管理"""
 
-    # PDCA 阶段映射
-    PHASE_ORDER = ["plan", "do", "check", "act"]
-    STAGE_MAP = {
-        "plan": ["requirement", "design"],
-        "do": ["development", "testing", "deployment"],
-        "check": ["operations", "monitor"],
-        "act": ["optimizer"]
-    }
+    # 默认阶段配置（配置文件不存在时使用）
+    DEFAULT_STAGES = [
+        StageConfig("requirement", "plan", "input/", "output/requirements/"),
+        StageConfig("design", "plan", "output/requirements/", "output/design/", depends_on=["requirement"]),
+        StageConfig("development", "do", "output/design/", "output/src/", depends_on=["design"]),
+        StageConfig("testing", "do", "output/src/", "output/tests/", depends_on=["development"]),
+        StageConfig("deployment", "do", "output/tests/", "output/deploy/", depends_on=["testing"]),
+        StageConfig("operations", "check", "output/deploy/", "output/operations/", depends_on=["deployment"]),
+        StageConfig("monitor", "check", "output/", "output/monitor/", depends_on=["operations"]),
+        StageConfig("optimizer", "act", "output/monitor/", "output/optimizer/", depends_on=["monitor"]),
+    ]
 
-    # 所有阶段列表（用于非 PDCA 模式）
-    ALL_STAGES = ["requirement", "design", "development", "testing",
-                  "deployment", "operations", "monitor", "optimizer"]
-
-    # 输入输出映射
-    INPUT_MAP = {
-        "requirement": "input/",
-        "design": "output/requirements/",
-        "development": "output/design/",
-        "testing": "output/src/",
-        "deployment": "output/tests/",
-        "operations": "output/deploy/",
-        "monitor": "output/",
-        "optimizer": "output/monitor/"
-    }
-
-    OUTPUT_MAP = {
-        "requirement": "output/requirements/",
-        "design": "output/design/",
-        "development": "output/src/",
-        "testing": "output/tests/",
-        "deployment": "output/deploy/",
-        "operations": "output/operations/",
-        "monitor": "output/monitor/",
-        "optimizer": "output/optimizer/"
-    }
-
-    def __init__(self, project_name: str, base_dir: str = None, execute: bool = False):
+    def __init__(self, project_name: str, base_dir: str = None, execute: bool = False,
+                 template: str = None, stages_override: List[str] = None):
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
         self.project_dir = self.base_dir / "projects" / project_name
@@ -220,6 +256,10 @@ class WorkflowExecutor:
         self.running = True
         self.execute = execute  # 是否实际执行子智能体
         self.subagent_executor = SubagentExecutor() if execute else None
+        
+        # 加载阶段配置
+        self.stages = self._load_stages(template, stages_override)
+        self.stage_map = {s.name: s for s in self.stages}
 
     # ==================== 配置与状态管理 ====================
 
@@ -265,6 +305,40 @@ class WorkflowExecutor:
                     config["execution"][key] = int(match.group(1))
 
             return config
+
+    def _load_stages(self, template: str = None, stages_override: List[str] = None) -> List[StageConfig]:
+        """加载阶段配置
+        
+        Args:
+            template: 模板名称
+            stages_override: 指定执行的阶段列表
+            
+        Returns:
+            List[StageConfig]: 阶段配置列表
+        """
+        # 优先级: stages_override > template > config.yaml > DEFAULT_STAGES
+        
+        if stages_override:
+            # 使用指定的阶段列表
+            return [s for s in self.DEFAULT_STAGES if s.name in stages_override]
+        
+        # 尝试从配置加载
+        workflow_config = self.config.get("workflow", {})
+        
+        if template:
+            # 使用指定模板
+            templates = workflow_config.get("templates", {})
+            template_stages = templates.get(template, {}).get("stages", [])
+            if template_stages:
+                return [s for s in self.DEFAULT_STAGES if s.name in template_stages]
+        
+        # 使用配置文件中的阶段定义
+        stages_config = workflow_config.get("stages", [])
+        if stages_config:
+            return [StageConfig.from_dict(s) for s in stages_config]
+        
+        # 使用默认配置
+        return self.DEFAULT_STAGES
 
     def _load_project_info(self) -> dict:
         """加载项目信息"""
@@ -322,46 +396,60 @@ class WorkflowExecutor:
     # ==================== 阶段管理 ====================
 
     def _get_next_stage(self, state: dict) -> Tuple[Optional[str], Optional[str]]:
-        """获取下一阶段（PDCA 模式）"""
-        current_phase = state.get("current_phase")
+        """获取下一阶段"""
         current_stage = state.get("current_stage")
 
-        if current_phase is None:
+        if current_stage is None:
+            # 开始第一个阶段
             state["cycle"] = state.get("cycle", 0) + 1
-            return "plan", "requirement"
-
-        phase_idx = self.PHASE_ORDER.index(current_phase)
-        stages = self.STAGE_MAP[current_phase]
-        stage_idx = stages.index(current_stage)
-
-        # 同一阶段下一任务
-        if stage_idx + 1 < len(stages):
-            return current_phase, stages[stage_idx + 1]
-
-        # 下一阶段
-        elif phase_idx + 1 < len(self.PHASE_ORDER):
-            next_phase = self.PHASE_ORDER[phase_idx + 1]
-            return next_phase, self.STAGE_MAP[next_phase][0]
-
-        # 循环完成
-        else:
-            state["history"].append({
-                "cycle": state["cycle"],
-                "completed_at": datetime.now().isoformat()
-            })
-
-            max_cycles = self.config["pdca"].get("max_cycles", 0)
-            if max_cycles == 0 or state["cycle"] < max_cycles:
-                state["cycle"] += 1
-                return "plan", "requirement"
-
+            if self.stages:
+                first_stage = self.stages[0]
+                return first_stage.phase, first_stage.name
             return None, None
 
-    def _generate_spawn_config(self, stage: str, phase: str) -> dict:
+        # 找到当前阶段索引
+        stage_names = [s.name for s in self.stages]
+        if current_stage not in stage_names:
+            return None, None
+        
+        stage_idx = stage_names.index(current_stage)
+        
+        # 下一阶段
+        if stage_idx + 1 < len(self.stages):
+            next_stage = self.stages[stage_idx + 1]
+            return next_stage.phase, next_stage.name
+
+        # 循环完成
+        state["history"].append({
+            "cycle": state["cycle"],
+            "completed_at": datetime.now().isoformat()
+        })
+
+        max_cycles = self.config["pdca"].get("max_cycles", 0)
+        if max_cycles == 0 or state["cycle"] < max_cycles:
+            state["cycle"] += 1
+            if self.stages:
+                first_stage = self.stages[0]
+                return first_stage.phase, first_stage.name
+
+        return None, None
+
+    def _generate_spawn_config(self, stage: str, phase: str = None) -> dict:
         """生成 sessions_spawn 配置"""
+        stage_config = self.stage_map.get(stage)
+        
+        # 从阶段配置获取属性
+        if stage_config:
+            input_path = self.project_dir / stage_config.input_dir if stage_config.input_dir else self.input_dir
+            output_path = self.project_dir / stage_config.output_dir if stage_config.output_dir else self.output_dir / stage
+            timeout = stage_config.timeout
+            phase = phase or stage_config.phase
+        else:
+            input_path = self.input_dir
+            output_path = self.output_dir / stage
+            timeout = self.config["execution"].get("timeout_seconds", 1800)
+        
         prompt = self._load_prompt(stage)
-        input_path = self.project_dir / self.INPUT_MAP.get(stage, "input/")
-        output_path = self.project_dir / self.OUTPUT_MAP.get(stage, "output/")
 
         task = f"""# 项目: {self.project_name} | PDCA 阶段: {phase.upper()} | 智能体: {stage}
 
@@ -385,7 +473,7 @@ class WorkflowExecutor:
                 "mode": "run",
                 "task": task,
                 "cwd": str(self.base_dir),
-                "timeoutSeconds": self.config["execution"].get("timeout_seconds", 1800),
+                "timeoutSeconds": timeout,
                 "label": f"{self.project_name}_{phase}_{stage}"
             },
             "stage": stage,
@@ -402,7 +490,11 @@ class WorkflowExecutor:
         Returns:
             Tuple[bool, Optional[str]]: (是否通过, 缺失的输入路径)
         """
-        input_path = self.INPUT_MAP.get(stage)
+        stage_config = self.stage_map.get(stage)
+        if not stage_config:
+            return True, None
+        
+        input_path = stage_config.input_dir
         if not input_path:
             return True, None
         
@@ -435,14 +527,13 @@ class WorkflowExecutor:
             StageExecutionError: 子智能体启动失败
             StageTimeoutError: 子智能体执行超时
         """
+        # 获取阶段配置
+        stage_config = self.stage_map.get(stage)
+        if not stage_config:
+            stage_config = StageConfig(stage, phase or "custom")
+        
         if phase is None:
-            # 根据 stage 推断 phase
-            for p, stages in self.STAGE_MAP.items():
-                if stage in stages:
-                    phase = p
-                    break
-            if phase is None:
-                phase = "custom"
+            phase = stage_config.phase
 
         # 依赖检查
         if self.execute and not skip_dependency_check:
@@ -544,10 +635,12 @@ class WorkflowExecutor:
     def execute_stages(self, stages: List[str]) -> List[dict]:
         """执行指定阶段列表"""
         results = []
+        stage_names = [s.name for s in self.stages]
+        
         print(f"\n🚀 执行指定阶段: {', '.join(stages)}")
 
         for stage in stages:
-            if stage not in self.ALL_STAGES:
+            if stage not in stage_names:
                 print(f"⚠️ 未知阶段: {stage}，跳过")
                 continue
 
@@ -557,7 +650,7 @@ class WorkflowExecutor:
         return results
 
     def execute_full_cycle(self) -> dict:
-        """执行完整 PDCA 循环
+        """执行完整工作流
         
         Returns:
             dict: 执行结果统计，包含:
@@ -588,70 +681,78 @@ class WorkflowExecutor:
         }
         start_time = time.time()
         
-        print(f"\n🔄 执行完整 PDCA 循环")
-        print(f"   PLAN: {', '.join(self.STAGE_MAP['plan'])}")
-        print(f"   DO: {', '.join(self.STAGE_MAP['do'])}")
-        print(f"   CHECK: {', '.join(self.STAGE_MAP['check'])}")
-        print(f"   ACT: {', '.join(self.STAGE_MAP['act'])}")
+        # 显示执行计划
+        print(f"\n🔄 执行工作流 ({len(self.stages)} 个阶段)")
+        phase_groups = {}
+        for s in self.stages:
+            if s.phase not in phase_groups:
+                phase_groups[s.phase] = []
+            phase_groups[s.phase].append(s.name)
+        for phase, stages in phase_groups.items():
+            print(f"   {phase.upper()}: {', '.join(stages)}")
 
         try:
-            for phase in self.PHASE_ORDER:
-                for stage in self.STAGE_MAP[phase]:
-                    stats["total"] += 1
+            for stage_config in self.stages:
+                stage = stage_config.name
+                phase = stage_config.phase
+                stats["total"] += 1
+                
+                # 跳过标记的阶段
+                if stage_config.skip:
+                    print(f"⏭️ 跳过阶段: {stage}")
+                    stats["skipped"] += 1
+                    continue
                     
-                    try:
-                        result = self.execute_stage(stage, phase)
-                        result["phase"] = phase
-                        stats["stages"].append(result)
-                        stats["success"] += 1
-                        
-                        # 更新状态
-                        state = self._read_state()
-                        state["current_phase"] = phase
-                        state["current_stage"] = stage
-                        self._save_state(state)
-                        
-                    except DependencyError as e:
-                        print(f"⚠️ 依赖检查失败: {e}")
-                        stats["stages"].append({
-                            "stage": stage,
-                            "phase": phase,
-                            "success": False,
-                            "error": str(e),
-                            "error_type": "dependency"
-                        })
-                        stats["failed"] += 1
-                        stats["error"] = str(e)
-                        # 依赖缺失，终止执行
-                        raise
-                        
-                    except StageExecutionError as e:
-                        print(f"❌ 阶段执行失败: {e}")
-                        stats["stages"].append({
-                            "stage": stage,
-                            "phase": phase,
-                            "success": False,
-                            "error": str(e),
-                            "error_type": "execution"
-                        })
-                        stats["failed"] += 1
-                        stats["error"] = str(e)
-                        # 执行失败，终止执行
-                        raise
-                        
-                    except StageTimeoutError as e:
-                        print(f"⏰ 阶段执行超时: {e}")
-                        stats["stages"].append({
-                            "stage": stage,
-                            "phase": phase,
-                            "success": False,
-                            "error": str(e),
-                            "error_type": "timeout"
-                        })
-                        stats["failed"] += 1
-                        stats["error"] = str(e)
-                        # 超时，终止执行
-                        raise
+                try:
+                    result = self.execute_stage(stage, phase)
+                    result["phase"] = phase
+                    stats["stages"].append(result)
+                    stats["success"] += 1
+                    
+                    # 更新状态
+                    state = self._read_state()
+                    state["current_phase"] = phase
+                    state["current_stage"] = stage
+                    self._save_state(state)
+                    
+                except DependencyError as e:
+                    print(f"⚠️ 依赖检查失败: {e}")
+                    stats["stages"].append({
+                        "stage": stage,
+                        "phase": phase,
+                        "success": False,
+                        "error": str(e),
+                        "error_type": "dependency"
+                    })
+                    stats["failed"] += 1
+                    stats["error"] = str(e)
+                    raise
+                    
+                except StageExecutionError as e:
+                    print(f"❌ 阶段执行失败: {e}")
+                    stats["stages"].append({
+                        "stage": stage,
+                        "phase": phase,
+                        "success": False,
+                        "error": str(e),
+                        "error_type": "execution"
+                    })
+                    stats["failed"] += 1
+                    stats["error"] = str(e)
+                    raise
+                    
+                except StageTimeoutError as e:
+                    print(f"⏰ 阶段执行超时: {e}")
+                    stats["stages"].append({
+                        "stage": stage,
+                        "phase": phase,
+                        "success": False,
+                        "error": str(e),
+                        "error_type": "timeout"
+                    })
+                    stats["failed"] += 1
+                    stats["error"] = str(e)
+                    raise
 
         except WorkflowError:
             # 工作流错误已记录，继续返回统计
@@ -793,8 +894,17 @@ def main():
   # 单步执行（实际运行子智能体）
   python3 scripts/workflow.py -p my_project --next --execute
 
-  # 指定阶段
-  python3 scripts/workflow.py -p my_project --stages requirement,design
+  # 指定阶段执行
+  python3 scripts/workflow.py -p my_project --stages requirement,design --execute
+
+  # 使用模板执行
+  python3 scripts/workflow.py -p my_project --template dev-only --execute
+
+  # 从指定阶段开始执行
+  python3 scripts/workflow.py -p my_project --from development --execute
+
+  # 执行到指定阶段
+  python3 scripts/workflow.py -p my_project --until testing --execute
 
   # 完整循环（实际执行）
   python3 scripts/workflow.py -p my_project --full-cycle --execute
@@ -812,7 +922,10 @@ def main():
     parser.add_argument("--status", "-s", action="store_true", help="查看状态")
     parser.add_argument("--next", "-n", action="store_true", help="执行下一阶段")
     parser.add_argument("--stages", help="执行指定阶段（逗号分隔）")
-    parser.add_argument("--full-cycle", "-f", action="store_true", help="执行完整 PDCA 循环")
+    parser.add_argument("--template", "-t", help="使用预设模板 (full-pdca/dev-only/test-only/plan-do)")
+    parser.add_argument("--from", dest="from_stage", help="从指定阶段开始执行")
+    parser.add_argument("--until", dest="until_stage", help="执行到指定阶段为止")
+    parser.add_argument("--full-cycle", "-f", action="store_true", help="执行完整工作流")
     parser.add_argument("--start", action="store_true", help="启动持续自动执行")
     parser.add_argument("--pause", action="store_true", help="暂停工作流")
     parser.add_argument("--resume", action="store_true", help="恢复工作流")
@@ -824,15 +937,35 @@ def main():
 
     args = parser.parse_args()
 
+    # 处理阶段范围
+    stages_override = None
+    if args.stages:
+        stages_override = [s.strip() for s in args.stages.split(",")]
+    elif args.from_stage or args.until_stage:
+        # 获取默认阶段列表
+        default_stages = [s.name for s in WorkflowExecutor.DEFAULT_STAGES]
+        from_idx = 0
+        until_idx = len(default_stages)
+        
+        if args.from_stage and args.from_stage in default_stages:
+            from_idx = default_stages.index(args.from_stage)
+        if args.until_stage and args.until_stage in default_stages:
+            until_idx = default_stages.index(args.until_stage) + 1
+        
+        stages_override = default_stages[from_idx:until_idx]
+
     executor = WorkflowExecutor(
         project_name=args.project,
-        execute=args.execute
+        execute=args.execute,
+        template=args.template,
+        stages_override=stages_override
     )
     if args.execute and executor.subagent_executor:
         executor.subagent_executor.gateway_url = args.gateway_url
 
     if args.status:
         result = executor.status()
+        result["stages"] = [s.name for s in executor.stages]
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif args.pause:
@@ -844,8 +977,8 @@ def main():
     elif args.reset:
         executor.reset()
 
-    elif args.stages:
-        stages = [s.strip() for s in args.stages.split(",")]
+    elif args.stages or args.from_stage or args.until_stage:
+        stages = stages_override
         results = executor.execute_stages(stages)
         if not args.execute:
             print(f"\n📋 执行结果（仅配置，使用 --execute 实际执行）:")
@@ -871,6 +1004,7 @@ def main():
     else:
         # 默认显示状态
         result = executor.status()
+        result["stages"] = [s.name for s in executor.stages]
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
