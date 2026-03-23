@@ -1,532 +1,244 @@
-# 全自动开发智能体系统
+# Auto Dev Agents
 
-**项目名称：** Auto-Dev-Agents  
-**架构：** 基于 OpenClaw 平台  
-**描述：** 利用 OpenClaw 平台能力，实现软件开发全流程自动化
+全自动开发智能体系统 - 基于 OpenClaw 平台
 
----
+## 特性
 
-## 🎯 项目目标
+- 🚀 **全自动开发流程**：从需求到部署的完整 PDCA 循环
+- 🧩 **可配置工作流**：灵活的阶段定义和模板支持
+- 🔄 **智能子任务拆分**：按技术层或功能模块动态拆分
+- 📊 **依赖自动推断**：基于规则引擎智能识别模块依赖
+- 📦 **大输入分批处理**：自动检测并分批处理超大输入
+- 🏗️ **多项目类型支持**：前后端分离、纯后端、DDD、微服务等
 
-将软件开发全流程（需求→设计→编码→测试→部署→运维）交给 AI 智能体团队自动完成。
+## 快速开始
 
-**核心理念：** 复用 OpenClaw 平台能力，不重复造轮子。
+### 安装
 
----
-
-## 🏗️ 系统架构
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│              全自动开发智能体系统 (v2.0)                         │
-│                    基于 OpenClaw 平台                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                   OpenClaw 平台能力                      │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │   │
-│  │  │ Sessions │ │   Cron   │ │  Memory  │ │  Tools   │   │   │
-│  │  │ 会话管理  │ │ 定时任务  │ │  知识库  │ │  工具集  │   │   │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘   │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐                │   │
-│  │  │  Agent   │ │ Spawn    │ │  Model   │                │   │
-│  │  │  智能体   │ │ 子会话   │ │  大模型  │                │   │
-│  │  └──────────┘ └──────────┘ └──────────┘                │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                   智能体工作流                           │   │
-│  │                                                           │   │
-│  │   Requirement → Design → Development → Testing           │   │
-│  │        ↓                                       ↓          │   │
-│  │   Optimizer ← Monitor ← Operations ← Deployment          │   │
-│  │                                                           │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                   项目数据                               │   │
-│  │   projects/{project}/input  → 输入（反馈、会议、工单）   │   │
-│  │   projects/{project}/output → 输出（文档、代码、部署）   │   │
-│  │   prompts/                  → 提示词库                  │   │
-│  │   knowledge/                → 知识库                    │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                   │
-└─────────────────────────────────────────────────────────────────┘
+```bash
+git clone https://github.com/hemlocker/auto-dev-agents.git
+cd auto-dev-agents
+pip install -r requirements.txt
 ```
 
----
+### 运行测试
 
-## 📁 项目结构
+```bash
+# 使用测试数据运行完整 PDCA 循环
+./test-data/run-test.sh my-project
+
+# 或手动执行
+python3 scripts/run.py -p my-project --full-cycle --execute
+```
+
+## 使用方式
+
+### 基本命令
+
+```bash
+# 查看状态
+python3 scripts/run.py -p my-project --status
+
+# 执行完整 PDCA 循环
+python3 scripts/run.py -p my-project --full-cycle --execute
+
+# 执行指定阶段
+python3 scripts/run.py -p my-project --stages requirement,design --execute
+
+# 使用模板
+python3 scripts/run.py -p my-project --template dev-only --execute
+```
+
+### 项目类型
+
+```bash
+# 前后端分离（默认）
+python3 scripts/run.py -p my-project --project-type fullstack --execute
+
+# 纯后端项目
+python3 scripts/run.py -p my-project --project-type backend_only --execute
+
+# Django 单体应用
+python3 scripts/run.py -p my-project --project-type django_monolith --execute
+
+# 微服务项目
+python3 scripts/run.py -p my-project --project-type microservices --execute
+```
+
+### 子任务拆分策略
+
+```bash
+# 按技术层拆分（水平切片）
+python3 scripts/run.py -p my-project --subtask-strategy layer --execute
+
+# 按功能模块拆分（垂直切片）
+python3 scripts/run.py -p my-project --subtask-strategy module --execute
+
+# 自动选择（推荐）
+python3 scripts/run.py -p my-project --subtask-strategy auto --execute
+```
+
+## 工作流阶段
+
+### PLAN 阶段
+| 阶段 | 说明 | 输出 |
+|------|------|------|
+| requirement | 需求分析 | 用户需求、软件需求、RTM |
+| design | 系统设计 | 架构设计、详细设计、API规范 |
+
+### DO 阶段
+| 阶段 | 说明 | 输出 |
+|------|------|------|
+| development | 代码开发 | 后端代码、前端代码 |
+| testing | 测试验证 | 单元测试、集成测试、测试报告 |
+| deployment | 部署配置 | Docker、Nginx、部署脚本 |
+
+### CHECK 阶段
+| 阶段 | 说明 | 输出 |
+|------|------|------|
+| operations | 运维配置 | Prometheus、Grafana、告警规则 |
+| monitor | 质量监控 | 质量报告、SLA统计 |
+
+### ACT 阶段
+| 阶段 | 说明 | 输出 |
+|------|------|------|
+| optimizer | 持续优化 | 优化建议、改进计划 |
+
+## 项目类型模板
+
+| 项目类型 | 子任务特点 | 适用场景 |
+|----------|------------|----------|
+| `fullstack` | 前后端分离，7个子任务 | Web 应用 |
+| `backend_only` | 纯后端，6个子任务 | API 服务、CLI 工具 |
+| `frontend_only` | 纯前端，5个子任务 | SPA 应用 |
+| `django_monolith` | Django单体，6个子任务 | Django 项目 |
+| `microservices` | 微服务，5个子任务 | 微服务架构 |
+
+## 子任务拆分策略
+
+### Layer 策略（水平切片）
+
+```
+子任务1: models（所有模块的数据模型）
+子任务2: repositories（所有模块的仓储）
+子任务3: services（所有模块的服务）
+子任务4: controllers（所有模块的控制器）
+```
+
+**适用：** 小型项目、传统分层团队
+
+### Module 策略（垂直切片）
+
+```
+子任务1: shared_infra（公共基础设施）
+子任务2: user_module（用户模块完整实现）
+子任务3: device_module（设备模块完整实现）
+子任务4: order_module（订单模块完整实现）
+```
+
+**适用：** 中大型项目、模块化架构、支持并行开发
+
+### Auto 策略
+
+- ≤2个模块 → 自动选择 `layer`
+- >2个模块 → 自动选择 `module`
+
+## 模块依赖推断
+
+系统自动从需求文档中推断模块依赖关系：
+
+```python
+需求描述:
+"设备需要关联所属用户"
+"维修需要关联设备和维修人员"
+
+自动推断:
+- device 依赖 user
+- repair 依赖 user + device
+- 开发顺序: user → device → repair
+```
+
+### 推断规则
+
+| 规则 | 模式 | 示例 |
+|------|------|------|
+| foreign_key | "A关联B" | 设备关联用户 → device依赖user |
+| composition | "A包含B" | 订单包含设备 → order依赖device |
+| reference | "A需要B信息" | 维修需要设备 → repair依赖device |
+| business_pattern | 业务模式 | 订单自动依赖用户 |
+
+## 配置说明
+
+```yaml
+# config.yaml
+
+# 项目配置
+projects:
+  type: fullstack  # 项目类型
+
+# 工作流配置
+workflow:
+  template: full-pdca      # 预设模板
+  subtask_strategy: auto    # 子任务拆分策略
+
+# 执行配置
+execution:
+  stage_delay_seconds: 30
+  timeout_seconds: 1800
+  
+  context:
+    max_input_tokens: 150000  # 最大输入 token
+    max_file_count: 50        # 最大文件数
+    batch_size: 15            # 分批文件数
+```
+
+## 目录结构
 
 ```
 auto-dev-agents/
-├── prompts/                  # 提示词库
-│   ├── coordinator/system.md # 协调智能体提示词
-│   ├── requirement/system.md # 需求智能体提示词
-│   ├── design/system.md      # 设计智能体提示词
-│   ├── development/system.md # 开发智能体提示词
-│   ├── testing/system.md     # 测试智能体提示词
-│   ├── deployment/system.md  # 部署智能体提示词
-│   ├── operations/system.md  # 运维智能体提示词
-│   ├── monitor/system.md     # 监控智能体提示词
-│   └── optimizer/system.md   # 优化智能体提示词
-│
-├── knowledge/                # 知识库
-│   ├── agents/              # 智能体知识
-│   ├── checklists/          # 检查清单
-│   └── templates/           # 文档模板
-│
-├── projects/                 # 项目目录（运行时创建，已加入 gitignore）
-│   └── {project_name}/      # 按项目名称创建
-│       ├── project.json     # 项目配置
-│       ├── input/           # 项目输入
-│       └── output/          # 项目输出
-│
-├── scripts/                  # 脚本工具
-│   ├── create_project.py      # 创建项目
-│   ├── workflow.py            # 工作流执行器（统一入口）
-│   ├── state_manager.py       # 统一状态管理器
-│   ├── context_manager.py     # 上下文管理器
-│   ├── input_monitor.py       # 输入监控
-│   ├── quality_gate.py        # 质量门禁
-│   ├── ticket_dedup.py        # 工单去重
-│   └── incremental_update.py  # 增量更新
-│
-├── docs/                     # 文档
-│
-├── .openclaw/                # OpenClaw 配置
-│   └── cron.yaml            # 定时任务配置
-│
-├── config.yaml               # 项目配置
-├── README.md                 # 项目说明
-└── requirements.txt          # Python 依赖
+├── scripts/
+│   ├── run.py              # CLI 入口
+│   ├── workflow/           # 核心模块
+│   │   ├── models.py       # 数据模型、子任务定义
+│   │   ├── executors.py    # 执行器
+│   │   └── state.py        # 状态管理
+│   ├── state_manager.py
+│   ├── context_manager.py
+│   ├── input_monitor.py
+│   └── quality_gate.py
+├── prompts/                # 智能体提示词
+│   ├── requirement/
+│   ├── design/
+│   └── ...
+├── projects/               # 项目数据
+├── test-data/              # 测试数据
+└── config.yaml             # 配置文件
 ```
 
----
+## 模型限制
 
-## 🤖 智能体团队
+当前配置针对以下模型限制优化：
 
-| 智能体 | 角色 | 职责 | 提示词 |
-|--------|------|------|--------|
-| **Coordinator** | 协调者 | 任务分配、流程控制 | prompts/coordinator/ |
-| **Requirement** | 需求分析师 | 需求收集、分析、转换 | prompts/requirement/ |
-| **Design** | 架构师 | 架构设计、详细设计 | prompts/design/ |
-| **Development** | 开发工程师 | 编码实现、代码审查 | prompts/development/ |
-| **Testing** | 测试专家 | 测试执行、质量验证 | prompts/testing/ |
-| **Deployment** | 运维工程师 | 部署上线、配置管理 | prompts/deployment/ |
-| **Operations** | 运维监控 | 系统监控、问题收集 | prompts/operations/ |
-| **Monitor** | 质量监控 | 质量检查、告警通知 | prompts/monitor/ |
-| **Optimizer** | 流程优化 | 流程改进、性能优化 | prompts/optimizer/ |
+| 参数 | 值 |
+|------|-----|
+| contextWindow | 202,752 |
+| maxTokens | 16,384 |
+| 安全输入 | 150,000 tokens |
 
----
+## 开发进度
 
-## 🚀 快速开始
+### v0.1.2
 
-### 1. 创建项目
+- ✅ 可配置工作流阶段（方案 A+B）
+- ✅ 错误处理和依赖检查
+- ✅ Gateway 认证自动加载
+- ✅ 子任务拆分 + 增量执行
+- ✅ 大输入分批处理
+- ✅ 模块依赖智能推断引擎
+- ✅ 子任务拆分策略选择（layer/module/auto）
+- ✅ 项目类型模板支持
+- ✅ 代码模块化重构
 
-```bash
-cd /root/.openclaw/workspace/projects/auto-dev-agents
+## 许可证
 
-# 创建新项目
-python3 scripts/create_project.py --name my_project --goal "订单管理系统"
-```
-
-### 2. 编辑项目目标
-
-```bash
-# 编辑项目目标文件
-vim projects/my_project/input/feedback/project_goal.md
-```
-
-### 3. 运行工作流
-
-**方式 1：命令行运行**
-```bash
-# 查看状态
-python3 scripts/workflow.py --project my_project --status
-
-# 执行下一阶段
-python3 scripts/workflow.py --project my_project --next
-
-# 执行指定阶段
-python3 scripts/workflow.py --project my_project --stages requirement,design
-
-# 执行完整 PDCA 循环
-python3 scripts/workflow.py --project my_project --full-cycle
-
-# 启动持续自动执行
-python3 scripts/workflow.py --project my_project --start
-```
-
-**方式 2：OpenClaw 子会话**
-
-在 OpenClaw 中使用 sessions_spawn 创建子会话运行智能体任务：
-
-```
-用 sessions_spawn 运行需求分析智能体，任务：分析 projects/my_project 的需求
-```
-
----
-
-## 🔧 脚本工具详解
-
-### 1. create_project.py - 创建项目
-
-```bash
-python3 scripts/create_project.py --name <项目名> --goal "<项目目标>"
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--name, -n` | 项目名称（必填） |
-| `--goal, -g` | 项目目标（必填） |
-
-**输出：** 创建 `projects/{项目名}/` 目录结构
-
----
-
-### 2. workflow.py - 工作流执行器（核心）
-
-统一的工作流管理入口，支持多种执行模式。
-
-```bash
-# 查看状态
-python3 scripts/workflow.py -p <项目名> --status
-
-# 单步执行（PDCA 模式）
-python3 scripts/workflow.py -p <项目名> --next
-
-# 指定阶段执行
-python3 scripts/workflow.py -p <项目名> --stages requirement,design
-
-# 完整 PDCA 循环
-python3 scripts/workflow.py -p <项目名> --full-cycle
-
-# 持续自动执行
-python3 scripts/workflow.py -p <项目名> --start
-
-# 暂停/恢复
-python3 scripts/workflow.py -p <项目名> --pause
-python3 scripts/workflow.py -p <项目名> --resume
-
-# 重置状态
-python3 scripts/workflow.py -p <项目名> --reset
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--project, -p` | 项目名称（必填） |
-| `--status, -s` | 查看当前状态 |
-| `--next, -n` | 执行下一阶段 |
-| `--stages` | 指定阶段（逗号分隔） |
-| `--full-cycle, -f` | 执行完整 PDCA 循环 |
-| `--start` | 启动持续自动执行 |
-| `--pause` | 暂停工作流 |
-| `--resume` | 恢复工作流 |
-| `--reset` | 重置状态 |
-
-**PDCA 阶段映射：**
-| Phase | 阶段 |
-|-------|------|
-| Plan | requirement, design |
-| Do | development, testing, deployment |
-| Check | operations, monitor |
-| Act | optimizer |
-
----
-
-### 3. state_manager.py - 统一状态管理器
-
-为智能体协作提供统一的状态管理，是协作能力改进的基础。
-
-```bash
-# 查看状态摘要
-python3 scripts/state_manager.py -p <项目名> --summary
-
-# 查看完整状态
-python3 scripts/state_manager.py -p <项目名> --status
-
-# 查看事件日志
-python3 scripts/state_manager.py -p <项目名> --events
-
-# 查看决策记录
-python3 scripts/state_manager.py -p <项目名> --decisions
-
-# 查看待处理反馈
-python3 scripts/state_manager.py -p <项目名> --feedback
-
-# 重置状态
-python3 scripts/state_manager.py -p <项目名> --reset
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--project, -p` | 项目名称（必填） |
-| `--status, -s` | 查看完整状态 |
-| `--summary` | 查看状态摘要 |
-| `--events, -e` | 查看事件日志 |
-| `--decisions, -d` | 查看决策记录 |
-| `--feedback, -f` | 查看待处理反馈 |
-| `--reset` | 重置状态 |
-
-**核心功能：**
-- 单一状态源（Single Source of Truth）
-- 状态变更追踪和历史版本
-- 事件日志记录
-- 智能体状态管理
-- 反馈系统
-- 决策记录
-
----
-
-### 4. context_manager.py - 上下文管理器
-
-为智能体提供增强的上下文传递能力。
-
-```bash
-# 查看阶段上下文摘要
-python3 scripts/context_manager.py -p <项目名> -s design --summary
-
-# 生成完整任务提示词
-python3 scripts/context_manager.py -p <项目名> -s design --prompt
-
-# 提取输出摘要
-python3 scripts/context_manager.py -p <项目名> -s requirement --extract
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--project, -p` | 项目名称（必填） |
-| `--stage, -s` | 阶段名称（必填） |
-| `--summary` | 查看上下文摘要 |
-| `--prompt` | 生成完整提示词 |
-| `--extract` | 提取输出摘要 |
-
-**核心功能：**
-- 阶段专属上下文生成
-- 相关决策自动过滤
-- 上游输出摘要传递
-- 输入文件自动发现
-- 输出要求规范化
-
----
-
-### 5. input_monitor.py - 输入监控
-
-监控项目输入目录，检测变化自动触发工作流。
-
-```bash
-# 启动持续监控
-python3 scripts/input_monitor.py -p <项目名> --start
-
-# 检查一次变化
-python3 scripts/input_monitor.py -p <项目名> --check
-
-# 查看状态
-python3 scripts/input_monitor.py -p <项目名> --status
-
-# 指定检查间隔
-python3 scripts/input_monitor.py -p <项目名> --start --interval 60
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--project, -p` | 项目名称（必填） |
-| `--start` | 启动持续监控 |
-| `--check, -c` | 检查一次变化 |
-| `--status, -s` | 查看状态 |
-| `--interval, -i` | 检查间隔（秒，默认 30） |
-
----
-
-### 6. quality_gate.py - 质量门禁
-
-检查各阶段输出是否达到质量标准。
-
-```bash
-# 检查所有阶段
-python3 scripts/quality_gate.py -p <项目名> --all
-
-# 检查指定阶段
-python3 scripts/quality_gate.py -p <项目名> --stage requirement
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--project, -p` | 项目名称（必填） |
-| `--stage, -s` | 检查指定阶段 |
-| `--all, -a` | 检查所有阶段 |
-
-**质量标准：**
-| 阶段 | 必需文件 | 最低分数 |
-|------|----------|----------|
-| requirement | 用户需求文档.md, 软件需求规格说明书.md | 90% |
-| design | 架构设计文档.md | 85% |
-| development | package.json | 80% |
-| testing | 测试报告.md | 80% |
-| deployment | docker-compose.yml | 85% |
-
----
-
-### 7. ticket_dedup.py - 工单去重
-
-扫描工单目录，识别并合并重复问题。
-
-```bash
-python3 scripts/ticket_dedup.py -p <项目名> --threshold 0.5
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--project, -p` | 项目名称（必填） |
-| `--threshold, -t` | 相似度阈值（0-1，默认 0.5） |
-
-**输出：** `output/optimizer/ticket-dedup-{时间戳}.md`
-
----
-
-### 8. incremental_update.py - 增量更新
-
-检测输入变化，只处理受影响的阶段。
-
-```bash
-# 分析变化
-python3 scripts/incremental_update.py -p <项目名> --analyze
-
-# 标记阶段完成
-python3 scripts/incremental_update.py -p <项目名> --complete requirement
-
-# 重置状态
-python3 scripts/incremental_update.py -p <项目名> --reset
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--project, -p` | 项目名称（必填） |
-| `--analyze, -a` | 分析输入变化 |
-| `--complete` | 标记阶段完成 |
-| `--reset` | 重置状态 |
-
----
-
-## 🔧 与 OpenClaw 集成
-
-### 使用 OpenClaw 会话能力
-
-本系统设计为**复用 OpenClaw 平台能力**：
-
-| OpenClaw 能力 | 本系统用途 |
-|--------------|-----------|
-| `sessions_spawn` | 创建子会话运行智能体任务 |
-| `sessions_list` | 查看运行中的智能体会话 |
-| `sessions_send` | 向智能体发送指令 |
-| `memory_search` | 智能体知识检索 |
-| `cron` | 定时触发工作流 |
-| `browser` | 智能体网页交互 |
-| `exec` | 智能体执行命令 |
-
-### 示例：在 OpenClaw 中运行智能体
-
-```
-用户：帮我运行 demo_project 的需求分析
-
-助手：好的，我来创建子会话运行需求分析智能体...
-
-[sessions_spawn(
-  runtime="subagent",
-  task="分析 projects/demo_project 的需求，参考 prompts/requirement/system.md",
-  cwd="/root/.openclaw/workspace/projects/auto-dev-agents"
-)]
-```
-
----
-
-## 📋 使用示例
-
-### 示例 1：启动新项目
-
-```bash
-# 创建项目
-python3 scripts/create_project.py \
-  --name order_system \
-  --goal "订单管理系统，支持订单创建、查询、统计"
-
-# 编辑需求
-vim projects/order_system/input/feedback/project_goal.md
-
-# 在 OpenClaw 中运行
-# 对 OpenClaw 说："运行 order_system 的开发工作流"
-```
-
-### 示例 2：查看项目状态
-
-```bash
-# 查看项目配置
-cat projects/{project_name}/project.json
-
-# 查看输出
-ls -la projects/{project_name}/output/
-```
-
----
-
-## 🔧 配置说明
-
-### 项目配置 (config.yaml)
-
-```yaml
-version: "2.0"
-
-projects:
-  dir: "projects"
-  default: ""  # 首次使用需创建项目
-
-workflow:
-  stages:
-    - name: "requirement"
-      agent: "RequirementAgent"
-      prompt: "prompts/requirement/system.md"
-    # ... 其他阶段
-
-  execution:
-    stage_delay_minutes: 5
-    quality_threshold: 0.85
-    max_iterations: 3
-
-openclaw:
-  use_default_model: true
-  runtime: "subagent"
-```
-
-### Cron 配置 (.openclaw/cron.yaml)
-
-通过 OpenClaw 的 cron 功能定时触发工作流。
-
----
-
-## 📖 相关文档
-
-- [智能体架构设计](docs/AGENT_ARCHITECTURE.md)
-- [项目管理指南](docs/PROJECT_MANAGEMENT_GUIDE.md)
-- [OpenClaw 文档](https://docs.openclaw.ai)
-
----
-
-## 🆚 v1 vs v2 对比
-
-| 特性 | v1（旧版） | v2（基于 OpenClaw） |
-|------|-----------|-------------------|
-| LLM 调用 | 自己实现 | 复用 OpenClaw |
-| 智能体类 | Python 类 | OpenClaw 会话 |
-| 工作流编排 | Python 脚本 | OpenClaw sessions_spawn |
-| 知识存储 | 自己实现 | OpenClaw memory |
-| 工具调用 | 自己实现 | OpenClaw tools |
-| 代码量 | ~3500 行 | ~500 行 |
-| 依赖 | 多个 Python 包 | 仅 pyyaml |
-
----
-
-**版本：** v0.1.1
-**架构：** 基于 OpenClaw 平台
+MIT
