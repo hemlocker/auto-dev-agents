@@ -24,8 +24,8 @@ execution:
   # 自动执行模式：无需对话
   mode: "auto"
   
-  # 阶段延迟（秒）
-  stage_delay_seconds: 60  # 1 分钟
+  # 阶段延迟（秒）- 设置为 0 立即执行下一阶段
+  stage_delay_seconds: 0
   
   # 超时（秒）
   timeout_seconds: 1800  # 30 分钟

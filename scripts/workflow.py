@@ -424,15 +424,23 @@ class WorkflowExecutor:
 
         return spawn_config
 
-    def _wait_for_completion(self, session_key: str, poll_interval: int = 30, max_wait: int = 3600):
-        """等待子智能体完成"""
+    def _wait_for_completion(self, session_key: str, poll_interval: int = 10, max_wait: int = 3600):
+        """等待子智能体完成
+
+        Args:
+            session_key: 子智能体会话 key
+            poll_interval: 轮询间隔（秒），默认 10 秒
+            max_wait: 最大等待时间（秒），默认 1 小时
+        """
         waited = 0
         while waited < max_wait:
             status = self.subagent_executor.check_status(session_key)
             if not status.get("running"):
-                print(f"✅ 子智能体已完成: {session_key}")
+                info = status.get("info", {})
+                duration = info.get("durationMs", 0) / 1000 if info else 0
+                print(f"✅ 子智能体完成 (耗时 {duration:.0f}s)")
                 return True
-            print(f"  ... 运行中 ({waited}s)")
+            print(f"  ⏳ 执行中... ({waited}s)")
             time.sleep(poll_interval)
             waited += poll_interval
         print(f"⏰ 等待超时: {session_key}")
