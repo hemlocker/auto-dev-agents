@@ -274,54 +274,68 @@ class SubtaskExecutor:
         return ordered
     
     def generate_subtask_prompt(self, subtask: dict, context: dict) -> str:
-        """生成子任务提示词"""
+        """生成子任务提示词（包含增量输出）"""
         base_prompt = self._load_stage_prompt()
         
-        # 构建上下文信息
+        # 构建上下文信息：包含已完成的子任务输出
         context_info = ""
         if subtask.get("depends_on"):
-            context_info += "\n## 已完成的子任务\n"
+            context_info += "\n## 已完成的子任务输出\n"
+            context_info += "请先读取以下已生成的文件，作为本次任务的输入：\n\n"
+            
             for dep in subtask["depends_on"]:
                 if dep in self.results:
-                    context_info += f"- {dep}: {self.results[dep].get('summary', '已完成')}\n"
+                    dep_result = self.results[dep]
+                    # 列出已生成的文件
+                    if dep_result.get("output_files"):
+                        for f in dep_result["output_files"]:
+                            context_info += f"- {f}\n"
+                    elif dep_result.get("output_dir"):
+                        context_info += f"- {dep_result['output_dir']}\n"
+                    
+                    # 摘要信息
+                    if dep_result.get("summary"):
+                        context_info += f"  （{dep_result['summary']}）\n"
         
         # 输出限制
         output_limit = ""
         if subtask.get("output_files"):
-            output_limit = f"\n## 输出文件\n本次只需输出: {', '.join(subtask['output_files'])}"
+            output_limit = f"\n## 本次输出文件\n只需输出以下文件: {', '.join(subtask['output_files'])}"
         elif subtask.get("output_dir"):
-            output_limit = f"\n## 输出目录\n本次只需输出到: {subtask['output_dir']}"
+            output_limit = f"\n## 本次输出目录\n只需输出到: {subtask['output_dir']}"
         
         return f"""# 子任务: {subtask['name']}
 
 ## 阶段: {self.stage}
 
+## 系统提示词
+{base_prompt[:2000]}  # 截取前 2000 字符避免过长
+
 ## 任务描述
 {subtask['description']}
-
 {context_info}
 {output_limit}
 
 ## 输出目录
 {self.output_dir}
 
-## 注意事项
-1. 只输出本次子任务的内容，不要输出其他文件
-2. 输出完成后在末尾添加: [SUBTASK_COMPLETE: {subtask['name']}]
-3. 如遇到问题，添加: [SUBTASK_QUESTION: 问题描述]
+## 增量执行要求
+1. **读取前置输出**: 先读取依赖子任务生成的文件
+2. **只输出本次内容**: 不要重复输出已有文件
+3. **完成标记**: 输出完成后添加 [SUBTASK_COMPLETE: {subtask['name']}]
+4. **问题标记**: 如有问题添加 [SUBTASK_QUESTION: 问题描述]
 """
     
-    def _load_stage_prompt(self) -> str:
-        """加载阶段提示词"""
-        prompt_path = self.base_dir / "prompts" / self.stage / "system.md"
-        if prompt_path.exists():
-            return prompt_path.read_text(encoding="utf-8")
-        return f"你是 {self.stage} 智能体，请完成你的任务。"
-    
     def record_result(self, subtask_name: str, result: dict):
-        """记录子任务结果"""
+        """记录子任务结果（包含输出文件信息）"""
         self.results[subtask_name] = result
         self.completed.add(subtask_name)
+    
+    def scan_output_files(self, output_dir: Path) -> List[str]:
+        """扫描输出目录中已生成的文件"""
+        if not output_dir.exists():
+            return []
+        return [str(f.relative_to(output_dir)) for f in output_dir.rglob("*") if f.is_file()]
     
     def get_summary(self) -> dict:
         """获取执行摘要"""
@@ -1032,17 +1046,19 @@ class WorkflowExecutor:
                 
                 # 检查子任务完成状态
                 if result.get("success"):
-                    print(f"   ✅ 子任务完成")
+                    new_files = result.get("output_files", [])
+                    print(f"   ✅ 子任务完成，生成 {len(new_files)} 个文件")
                     executor.record_result(subtask_name, {
                         "success": True,
-                        "output": result.get("output", ""),
+                        "output_files": new_files,
+                        "output_dir": result.get("output_dir"),
                         "summary": subtask["description"]
                     })
                 else:
-                    print(f"   ⚠️ 子任务可能不完整")
+                    print(f"   ⚠️ 子任务可能不完整: {result.get('error', '未知')}")
                     executor.record_result(subtask_name, {
-                        "success": result.get("success", False),
-                        "output": result.get("output", ""),
+                        "success": False,
+                        "error": result.get("error"),
                         "summary": subtask["description"]
                     })
                 
@@ -1098,6 +1114,11 @@ class WorkflowExecutor:
         
         label = f"{self.project_name}_{phase}_{stage}_{subtask_name}"
         
+        # 记录执行前的文件列表
+        existing_files = set()
+        if output_dir.exists():
+            existing_files = {str(f) for f in output_dir.rglob("*") if f.is_file()}
+        
         spawn_config = {
             "action": "sessions_spawn",
             "params": {
@@ -1149,10 +1170,18 @@ class WorkflowExecutor:
                             "duration": time.time() - start_time
                         }
         
+        # 扫描新生成的文件（增量输出）
+        new_files = []
+        if output_dir.exists():
+            current_files = {str(f) for f in output_dir.rglob("*") if f.is_file()}
+            new_files = [str(f) for f in (current_files - existing_files)]
+        
         return {
             "success": True,
             "duration": time.time() - start_time,
-            "output_dir": str(output_dir)
+            "output_dir": str(output_dir),
+            "output_files": new_files,  # 新增：本次生成的文件列表
+            "total_files": len(new_files)
         }
     
     def _execute_stage_single(self, stage: str, phase: str, wait: bool = True,
