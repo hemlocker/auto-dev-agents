@@ -588,3 +588,96 @@ def get_subtasks_for_project(project_type: str = "fullstack", custom_subtasks: d
         return result
     
     return STAGE_SUBTASKS
+
+
+def generate_development_subtasks(
+    strategy: str,
+    modules: List[dict] = None,
+    project_type: str = "fullstack"
+) -> List[dict]:
+    """生成开发阶段的子任务
+    
+    Args:
+        strategy: 拆分策略
+            - module: 按功能模块拆分（垂直切片）
+            - layer: 按技术层拆分（水平切片）
+            - auto: 根据模块数量自动选择
+        modules: 模块信息列表 [{"name": "user", "dependencies": [], ...}]
+        project_type: 项目类型
+    
+    Returns:
+        List[dict]: 子任务列表
+    """
+    
+    # 自动策略：根据模块数量选择
+    if strategy == "auto":
+        module_count = len(modules) if modules else 0
+        strategy = "layer" if module_count <= 2 else "module"
+    
+    if strategy == "layer":
+        # 使用预定义的分层子任务
+        subtasks = get_subtasks_for_project(project_type)
+        return subtasks.get("development", [])
+    
+    elif strategy == "module":
+        # 按功能模块拆分
+        if not modules:
+            # 没有模块信息，回退到分层
+            subtasks = get_subtasks_for_project(project_type)
+            return subtasks.get("development", [])
+        
+        # 构建依赖图并排序
+        analyzer = ModuleDependencyAnalyzer()
+        graph = analyzer.build_dependency_graph(modules)
+        order = analyzer.topological_sort(graph)
+        parallel_groups = analyzer.get_parallel_groups(graph)
+        
+        subtasks = [
+            {
+                "name": "shared_infra",
+                "description": "公共基础设施（配置、工具类、基类）",
+                "output_dir": "src/shared/",
+                "output_files": ["__init__.py", "config.py", "utils.py", "base.py"],
+                "max_tokens_estimate": 5000,
+                "batch": 0
+            }
+        ]
+        
+        # 模块名映射到中文描述
+        name_desc = {
+            "user": "用户管理",
+            "device": "设备管理",
+            "order": "订单管理",
+            "comment": "评论管理",
+            "repair": "维修管理",
+            "log": "日志管理",
+            "notification": "通知管理",
+            "message": "消息管理",
+        }
+        
+        for batch_idx, batch_modules in enumerate(parallel_groups, start=1):
+            for module_name in batch_modules:
+                # 查找模块信息
+                module_info = next((m for m in modules if m["name"] == module_name), {})
+                desc = module_info.get("description") or name_desc.get(module_name, module_name)
+                deps = module_info.get("dependencies", [])
+                
+                # 构建依赖列表（shared_infra + 前置模块）
+                task_deps = ["shared_infra"] + [f"{d}_module" for d in deps]
+                
+                subtasks.append({
+                    "name": f"{module_name}_module",
+                    "description": f"{desc}模块完整实现",
+                    "module": module_name,
+                    "output_dir": f"src/{module_name}/",
+                    "includes": ["models", "services", "controllers", "schemas"],
+                    "max_tokens_estimate": 12000,
+                    "depends_on": task_deps,
+                    "batch": batch_idx
+                })
+        
+        return subtasks
+    
+    # 未知策略，回退到分层
+    subtasks = get_subtasks_for_project(project_type)
+    return subtasks.get("development", [])

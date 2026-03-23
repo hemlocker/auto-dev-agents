@@ -60,7 +60,7 @@ class WorkflowExecutor:
 
     def __init__(self, project_name: str, base_dir: str = None, execute: bool = False,
                  template: str = None, stages_override: List[str] = None,
-                 project_type: str = None):
+                 project_type: str = None, subtask_strategy: str = None):
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
         self.project_dir = self.base_dir / "projects" / project_name
@@ -74,6 +74,12 @@ class WorkflowExecutor:
         
         # 项目类型（从参数或配置读取）
         self.project_type = project_type or self.config.get("projects", {}).get("type", "fullstack")
+        
+        # 子任务拆分策略（从参数或配置读取）
+        self.subtask_strategy = subtask_strategy or self.config.get("workflow", {}).get("subtask_strategy", "layer")
+        
+        # 模块信息（从需求阶段读取）
+        self.modules = []
         
         # 加载阶段配置
         self.stages = self._load_stages(template, stages_override)
@@ -142,6 +148,36 @@ class WorkflowExecutor:
         if prompt_path.exists():
             return prompt_path.read_text(encoding="utf-8")
         return f"你是 {stage} 智能体，请完成你的任务。"
+
+    def _load_modules(self) -> List[dict]:
+        """从需求阶段输出加载模块信息
+        
+        Returns:
+            List[dict]: 模块列表 [{"name": "user", "dependencies": [], ...}]
+        """
+        # 尝试从需求输出读取
+        modules_file = self.output_dir / "requirements" / "modules.json"
+        if modules_file.exists():
+            try:
+                data = json.loads(modules_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict) and "modules" in data:
+                    return data["modules"]
+            except:
+                pass
+        
+        # 尝试从分析结果读取
+        analysis_file = self.output_dir / "requirements" / "module_analysis.json"
+        if analysis_file.exists():
+            try:
+                data = json.loads(analysis_file.read_text(encoding="utf-8"))
+                if "modules" in data:
+                    return data["modules"]
+            except:
+                pass
+        
+        return []
 
     # ==================== 阶段管理 ====================
 
@@ -286,9 +322,15 @@ class WorkflowExecutor:
                 raise DependencyError(stage, missing)
         
         # 检查是否有子任务定义
+        # 如果是 development 阶段，先加载模块信息
+        if stage == "development" and not self.modules:
+            self.modules = self._load_modules()
+        
         subtask_executor = SubtaskExecutor(
             stage, self.output_dir / stage, self.base_dir, 
-            project_type=self.project_type
+            project_type=self.project_type,
+            subtask_strategy=self.subtask_strategy,
+            modules=self.modules
         )
         output_path = self.project_dir / (stage_config.output_dir or f"output/{stage}")
         
@@ -786,6 +828,8 @@ def main():
     parser.add_argument("--project-type", choices=[
         "fullstack", "backend_only", "frontend_only", "django_monolith", "microservices", "custom"
     ], help="项目类型（影响子任务拆分）")
+    parser.add_argument("--subtask-strategy", choices=["layer", "module", "auto"],
+                        help="子任务拆分策略: layer(按技术层), module(按功能模块), auto(自动选择)")
     parser.add_argument("--from", dest="from_stage", help="从指定阶段开始")
     parser.add_argument("--until", dest="until_stage", help="执行到指定阶段")
     parser.add_argument("--full-cycle", "-f", action="store_true", help="执行完整工作流")
@@ -818,7 +862,8 @@ def main():
         execute=args.execute,
         template=args.template,
         stages_override=stages_override,
-        project_type=getattr(args, 'project_type', None)
+        project_type=getattr(args, 'project_type', None),
+        subtask_strategy=getattr(args, 'subtask_strategy', None)
     )
     if args.execute and executor.subagent_executor:
         executor.subagent_executor.gateway_url = args.gateway_url

@@ -17,6 +17,12 @@ workflow:
   # 预设模板: full-pdca | dev-only | test-only | custom
   template: "full-pdca"
   
+  # 子任务拆分策略
+  # - module: 按功能模块拆分（垂直切片，每个模块包含所有层）
+  # - layer: 按技术层拆分（水平切片，每层包含所有模块）
+  # - auto: 根据模块数量自动选择（≤2模块用layer，>2用module）
+  subtask_strategy: "auto"
+  
   # 阶段定义（template=custom 时生效）
   stages:
     - name: requirement

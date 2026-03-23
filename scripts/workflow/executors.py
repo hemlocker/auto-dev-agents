@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Iterator
 
-from .models import StageConfig, STAGE_SUBTASKS, get_subtasks_for_project
+from .models import StageConfig, STAGE_SUBTASKS, get_subtasks_for_project, generate_development_subtasks
 
 
 # ==================== Gateway 配置 ====================
@@ -261,14 +261,30 @@ class SubtaskExecutor:
     """子任务执行器 - 处理任务拆分和增量执行"""
     
     def __init__(self, stage: str, output_dir: Path, base_dir: Path, 
-                 project_type: str = "fullstack", custom_subtasks: dict = None):
+                 project_type: str = "fullstack",
+                 subtask_strategy: str = "layer",
+                 modules: List[dict] = None,
+                 custom_subtasks: dict = None):
         self.stage = stage
         self.output_dir = output_dir
         self.base_dir = base_dir
+        self.project_type = project_type
+        self.subtask_strategy = subtask_strategy
+        self.modules = modules or []
         
-        # 根据项目类型获取子任务定义
-        all_subtasks = get_subtasks_for_project(project_type, custom_subtasks)
-        self.subtasks = all_subtasks.get(stage, [])
+        # 根据策略获取子任务定义
+        if stage == "development" and subtask_strategy in ["module", "auto"]:
+            # development 阶段支持模块拆分
+            self.subtasks = generate_development_subtasks(
+                strategy=subtask_strategy,
+                modules=modules,
+                project_type=project_type
+            )
+        else:
+            # 其他阶段使用预定义子任务
+            all_subtasks = get_subtasks_for_project(project_type, custom_subtasks)
+            self.subtasks = all_subtasks.get(stage, [])
+        
         self.completed = set()
         self.results = {}
     
