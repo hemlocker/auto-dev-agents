@@ -98,18 +98,24 @@ execution:
   timeout_seconds: 1800  # 30 分钟
   
   # 上下文限制配置
+  # 模型限制: contextWindow=202752, maxTokens=16384
   context:
-    # 最大输入 token 数（超过则分批）
-    max_input_tokens: 50000
+    # 最大输入 token 数
+    # 计算: 202752 - 16384(输出) - 5000(系统提示) - 10000(安全边际) ≈ 171000
+    max_input_tokens: 150000
     
-    # 单文件最大 KB（超过警告）
-    max_file_size_kb: 100
+    # 单文件最大 KB（警告阈值）
+    # 150KB ≈ 75000 token (中文)
+    max_file_size_kb: 150
     
     # 最大文件数（超过则分批）
-    max_file_count: 30
+    max_file_count: 50
     
     # 分批时每批文件数
-    batch_size: 10
+    batch_size: 15
+    
+    # 输出预留 token
+    output_reserve_tokens: 16384
 
 # 反馈机制
 feedback:

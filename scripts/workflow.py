@@ -82,9 +82,12 @@ class InputAnalyzer:
     
     # Token 估算参数
     CHARS_PER_TOKEN = 2  # 中文约 2 字符/token
-    DEFAULT_MAX_TOKENS = 50000  # 默认最大输入 token
-    DEFAULT_MAX_FILES = 30  # 默认最大文件数
-    DEFAULT_BATCH_SIZE = 10  # 默认每批文件数
+    # 模型限制: contextWindow=202752, maxTokens=16384
+    # 安全输入: 202752 - 16384(输出) - 5000(系统提示) - 10000(安全边际) ≈ 171000
+    DEFAULT_MAX_TOKENS = 150000  # 默认最大输入 token
+    DEFAULT_MAX_FILES = 50  # 默认最大文件数
+    DEFAULT_BATCH_SIZE = 15  # 默认每批文件数
+    DEFAULT_OUTPUT_RESERVE = 16384  # 输出预留 token
     SUPPORTED_EXTENSIONS = [".md", ".txt", ".json", ".yaml", ".yml"]
     
     def __init__(self, input_dir: Path, config: dict = None):
