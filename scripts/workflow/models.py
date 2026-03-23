@@ -6,7 +6,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 
 
@@ -72,6 +72,7 @@ class DependencyError(WorkflowError):
 
 # ==================== 子任务定义 ====================
 
+# 默认子任务模板（前后端分离项目）
 STAGE_SUBTASKS = {
     "requirement": [
         {
@@ -235,3 +236,85 @@ STAGE_SUBTASKS = {
         }
     ]
 }
+
+
+# ==================== 项目类型子任务模板 ====================
+
+SUBTASK_TEMPLATES = {
+    # 前后端分离项目（默认）
+    "fullstack": None,  # 使用默认 STAGE_SUBTASKS
+    
+    # 纯后端项目
+    "backend_only": {
+        "development": [
+            {"name": "project_structure", "description": "创建项目结构和配置文件"},
+            {"name": "models", "description": "创建数据模型", "depends_on": ["project_structure"]},
+            {"name": "repositories", "description": "创建数据访问层", "depends_on": ["models"]},
+            {"name": "services", "description": "创建业务逻辑层", "depends_on": ["repositories"]},
+            {"name": "controllers", "description": "创建控制器层", "depends_on": ["services"]},
+            {"name": "cli", "description": "创建 CLI 入口", "depends_on": ["controllers"]}
+        ]
+    },
+    
+    # 纯前端项目
+    "frontend_only": {
+        "development": [
+            {"name": "project_structure", "description": "创建项目结构和配置文件"},
+            {"name": "components", "description": "创建 UI 组件"},
+            {"name": "pages", "description": "创建页面", "depends_on": ["components"]},
+            {"name": "api_client", "description": "创建 API 客户端"},
+            {"name": "store", "description": "创建状态管理", "depends_on": ["api_client"]}
+        ]
+    },
+    
+    # Django 单体应用
+    "django_monolith": {
+        "development": [
+            {"name": "project_structure", "description": "创建 Django 项目结构"},
+            {"name": "models", "description": "创建数据模型"},
+            {"name": "views", "description": "创建视图", "depends_on": ["models"]},
+            {"name": "templates", "description": "创建模板", "depends_on": ["views"]},
+            {"name": "forms", "description": "创建表单", "depends_on": ["models"]},
+            {"name": "urls", "description": "配置路由", "depends_on": ["views"]}
+        ]
+    },
+    
+    # 微服务项目
+    "microservices": {
+        "development": [
+            {"name": "project_structure", "description": "创建微服务项目结构"},
+            {"name": "shared_models", "description": "创建共享数据模型"},
+            {"name": "service_core", "description": "创建核心服务", "depends_on": ["shared_models"]},
+            {"name": "api_gateway", "description": "创建 API 网关", "depends_on": ["service_core"]},
+            {"name": "docker", "description": "创建 Docker 配置", "depends_on": ["service_core", "api_gateway"]}
+        ]
+    }
+}
+
+
+def get_subtasks_for_project(project_type: str = "fullstack", custom_subtasks: dict = None) -> dict:
+    """根据项目类型获取子任务定义
+    
+    Args:
+        project_type: 项目类型
+            - fullstack: 前后端分离（默认）
+            - backend_only: 纯后端
+            - frontend_only: 纯前端
+            - django_monolith: Django 单体
+            - microservices: 微服务
+            - custom: 自定义
+        custom_subtasks: 自定义子任务定义（project_type="custom" 时使用）
+    
+    Returns:
+        dict: 完整的子任务定义
+    """
+    if project_type == "custom" and custom_subtasks:
+        return custom_subtasks
+    
+    if project_type in SUBTASK_TEMPLATES and SUBTASK_TEMPLATES[project_type]:
+        # 合并默认子任务和项目类型特定子任务
+        result = dict(STAGE_SUBTASKS)
+        result.update(SUBTASK_TEMPLATES[project_type])
+        return result
+    
+    return STAGE_SUBTASKS

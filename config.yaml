@@ -7,6 +7,10 @@ version: "2.0"
 projects:
   dir: "projects"
   default: "demo_project"
+  
+  # 项目类型（影响子任务拆分）
+  # 可选: fullstack, backend_only, frontend_only, django_monolith, microservices, custom
+  type: "fullstack"
 
 # 工作流配置
 workflow:

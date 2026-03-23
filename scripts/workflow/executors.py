@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Iterator
 
-from .models import StageConfig, STAGE_SUBTASKS
+from .models import StageConfig, STAGE_SUBTASKS, get_subtasks_for_project
 
 
 # ==================== Gateway 配置 ====================
@@ -260,11 +260,15 @@ class InputAnalyzer:
 class SubtaskExecutor:
     """子任务执行器 - 处理任务拆分和增量执行"""
     
-    def __init__(self, stage: str, output_dir: Path, base_dir: Path):
+    def __init__(self, stage: str, output_dir: Path, base_dir: Path, 
+                 project_type: str = "fullstack", custom_subtasks: dict = None):
         self.stage = stage
         self.output_dir = output_dir
         self.base_dir = base_dir
-        self.subtasks = STAGE_SUBTASKS.get(stage, [])
+        
+        # 根据项目类型获取子任务定义
+        all_subtasks = get_subtasks_for_project(project_type, custom_subtasks)
+        self.subtasks = all_subtasks.get(stage, [])
         self.completed = set()
         self.results = {}
     

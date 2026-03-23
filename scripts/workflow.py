@@ -59,7 +59,8 @@ class WorkflowExecutor:
     ]
 
     def __init__(self, project_name: str, base_dir: str = None, execute: bool = False,
-                 template: str = None, stages_override: List[str] = None):
+                 template: str = None, stages_override: List[str] = None,
+                 project_type: str = None):
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
         self.project_dir = self.base_dir / "projects" / project_name
@@ -70,6 +71,9 @@ class WorkflowExecutor:
         self.execute = execute
         self.subagent_executor = SubagentExecutor() if execute else None
         self.state = WorkflowState(self.project_dir)
+        
+        # 项目类型（从参数或配置读取）
+        self.project_type = project_type or self.config.get("projects", {}).get("type", "fullstack")
         
         # 加载阶段配置
         self.stages = self._load_stages(template, stages_override)
@@ -282,7 +286,10 @@ class WorkflowExecutor:
                 raise DependencyError(stage, missing)
         
         # 检查是否有子任务定义
-        subtask_executor = SubtaskExecutor(stage, self.output_dir / stage, self.base_dir)
+        subtask_executor = SubtaskExecutor(
+            stage, self.output_dir / stage, self.base_dir, 
+            project_type=self.project_type
+        )
         output_path = self.project_dir / (stage_config.output_dir or f"output/{stage}")
         
         if subtask_executor.has_subtasks() and self.execute:
@@ -776,6 +783,9 @@ def main():
     parser.add_argument("--next", "-n", action="store_true", help="执行下一阶段")
     parser.add_argument("--stages", help="执行指定阶段（逗号分隔）")
     parser.add_argument("--template", "-t", help="使用预设模板")
+    parser.add_argument("--project-type", choices=[
+        "fullstack", "backend_only", "frontend_only", "django_monolith", "microservices", "custom"
+    ], help="项目类型（影响子任务拆分）")
     parser.add_argument("--from", dest="from_stage", help="从指定阶段开始")
     parser.add_argument("--until", dest="until_stage", help="执行到指定阶段")
     parser.add_argument("--full-cycle", "-f", action="store_true", help="执行完整工作流")
@@ -807,7 +817,8 @@ def main():
         project_name=args.project,
         execute=args.execute,
         template=args.template,
-        stages_override=stages_override
+        stages_override=stages_override,
+        project_type=getattr(args, 'project_type', None)
     )
     if args.execute and executor.subagent_executor:
         executor.subagent_executor.gateway_url = args.gateway_url
