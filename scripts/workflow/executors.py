@@ -466,11 +466,49 @@ class SubtaskExecutor:
         return subtask
     
     def _load_stage_prompt(self) -> str:
-        """加载阶段提示词"""
+        """加载阶段提示词（包含知识库）"""
+        # 1. 加载提示词（指令）
         prompt_path = self.base_dir / "prompts" / self.stage / "system.md"
         if prompt_path.exists():
-            return prompt_path.read_text(encoding="utf-8")
-        return f"你是 {self.stage} 智能体，请完成你的任务。"
+            prompt = prompt_path.read_text(encoding="utf-8")
+        else:
+            prompt = f"你是 {self.stage} 智能体，请完成你的任务。"
+        
+        # 2. 加载知识库（参考）
+        knowledge_parts = []
+        knowledge_dir = self.base_dir / "knowledge" / "agents" / self.stage
+        
+        # 加载编码规范
+        guidelines_path = knowledge_dir / "guidelines.md"
+        if guidelines_path.exists():
+            guidelines = guidelines_path.read_text(encoding="utf-8")
+            # 只取前 5000 字符，避免过长
+            if len(guidelines) > 5000:
+                guidelines = guidelines[:5000] + "\n\n... (内容已截断，请参考完整文件)"
+            knowledge_parts.append(f"## 编码规范\n\n{guidelines}")
+        
+        # 加载代码模板
+        templates_path = knowledge_dir / "templates.md"
+        if templates_path.exists():
+            templates = templates_path.read_text(encoding="utf-8")
+            if len(templates) > 8000:
+                templates = templates[:8000] + "\n\n... (内容已截断，请参考完整文件)"
+            knowledge_parts.append(f"## 代码模板\n\n{templates}")
+        
+        # 加载最佳实践
+        best_practices_path = knowledge_dir / "best-practices.md"
+        if best_practices_path.exists():
+            best_practices = best_practices_path.read_text(encoding="utf-8")
+            if len(best_practices) > 5000:
+                best_practices = best_practices[:5000] + "\n\n... (内容已截断，请参考完整文件)"
+            knowledge_parts.append(f"## 最佳实践\n\n{best_practices}")
+        
+        # 合并提示词和知识库
+        if knowledge_parts:
+            knowledge_text = "\n\n---\n\n".join(knowledge_parts)
+            return f"{prompt}\n\n# 知识库参考\n\n{knowledge_text}"
+        
+        return prompt
     
     def record_result(self, subtask_name: str, result: dict):
         """记录子任务结果（包含输出文件信息）"""
