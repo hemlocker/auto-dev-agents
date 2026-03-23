@@ -34,9 +34,108 @@ import argparse
 import json
 import re
 import time
+import subprocess
+import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
+
+
+# Gateway HTTP API 配置
+GATEWAY_URL = "http://127.0.0.1:18799"
+GATEWAY_TOKEN = None  # 从环境变量或配置读取
+
+
+class SubagentExecutor:
+    """子智能体执行器 - 通过 OpenClaw Gateway HTTP API 执行"""
+
+    def __init__(self, gateway_url: str = None, gateway_token: str = None):
+        self.gateway_url = gateway_url or GATEWAY_URL
+        self.gateway_token = gateway_token or GATEWAY_TOKEN
+
+    def spawn(self, task: str, cwd: str, label: str, timeout_seconds: int = 1800) -> dict:
+        """
+        通过 Gateway HTTP API 启动子智能体
+
+        Returns:
+            dict: 包含 session_key 和 status 的结果
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.gateway_token:
+            headers["Authorization"] = f"Bearer {self.gateway_token}"
+
+        payload = {
+            "tool": "sessions_spawn",
+            "args": {
+                "runtime": "subagent",
+                "mode": "run",
+                "task": task,
+                "cwd": cwd,
+                "timeoutSeconds": timeout_seconds,
+                "label": label
+            }
+        }
+
+        try:
+            response = requests.post(
+                f"{self.gateway_url}/tools/invoke",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                # sessions_spawn 未在允许列表
+                return {
+                    "ok": False,
+                    "error": "sessions_spawn 被 Gateway 禁用，请配置 gateway.tools.allow"
+                }
+            else:
+                return {
+                    "ok": False,
+                    "error": f"HTTP {response.status_code}: {response.text}"
+                }
+        except requests.exceptions.ConnectionError:
+            return {
+                "ok": False,
+                "error": "无法连接 Gateway，请确保 Gateway 正在运行"
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def check_status(self, session_key: str) -> dict:
+        """检查子智能体状态"""
+        headers = {"Content-Type": "application/json"}
+        if self.gateway_token:
+            headers["Authorization"] = f"Bearer {self.gateway_token}"
+
+        payload = {
+            "tool": "subagents",
+            "args": {"action": "list"}
+        }
+
+        try:
+            response = requests.post(
+                f"{self.gateway_url}/tools/invoke",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok") and data.get("result"):
+                    for sub in data["result"].get("active", []):
+                        if sub.get("sessionKey") == session_key:
+                            return {"running": True, "info": sub}
+                    for sub in data["result"].get("recent", []):
+                        if sub.get("sessionKey") == session_key:
+                            return {"running": False, "info": sub}
+                return {"running": False, "info": None}
+            return {"running": False, "error": response.text}
+        except Exception as e:
+            return {"running": False, "error": str(e)}
 
 
 class WorkflowExecutor:
@@ -78,7 +177,7 @@ class WorkflowExecutor:
         "optimizer": "output/optimizer/"
     }
 
-    def __init__(self, project_name: str, base_dir: str = None):
+    def __init__(self, project_name: str, base_dir: str = None, execute: bool = False):
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
         self.project_dir = self.base_dir / "projects" / project_name
@@ -88,6 +187,8 @@ class WorkflowExecutor:
         self.log_file = self.project_dir / "logs" / "workflow.jsonl"
         self.config = self._load_config()
         self.running = True
+        self.execute = execute  # 是否实际执行子智能体
+        self.subagent_executor = SubagentExecutor() if execute else None
 
     # ==================== 配置与状态管理 ====================
 
@@ -264,8 +365,17 @@ class WorkflowExecutor:
 
     # ==================== 执行模式 ====================
 
-    def execute_stage(self, stage: str, phase: str = None) -> dict:
-        """执行单个阶段"""
+    def execute_stage(self, stage: str, phase: str = None, wait: bool = True) -> dict:
+        """执行单个阶段
+
+        Args:
+            stage: 阶段名称
+            phase: PDCA 阶段
+            wait: 是否等待子智能体完成（仅当 execute=True 时有效）
+
+        Returns:
+            dict: 执行结果
+        """
         if phase is None:
             # 根据 stage 推断 phase
             for p, stages in self.STAGE_MAP.items():
@@ -287,7 +397,46 @@ class WorkflowExecutor:
 
         self._log_execution(phase, stage, spawn_config)
 
+        # 实际执行子智能体
+        if self.execute and self.subagent_executor:
+            print(f"\n🚀 启动子智能体: {spawn_config['params']['label']}")
+
+            result = self.subagent_executor.spawn(
+                task=spawn_config["params"]["task"],
+                cwd=spawn_config["params"]["cwd"],
+                label=spawn_config["params"]["label"],
+                timeout_seconds=spawn_config["params"]["timeoutSeconds"]
+            )
+
+            if not result.get("ok"):
+                print(f"❌ 启动失败: {result.get('error')}")
+                spawn_config["spawn_result"] = result
+                return spawn_config
+
+            spawn_config["spawn_result"] = result
+
+            if wait:
+                # 等待子智能体完成
+                session_key = result.get("result", {}).get("childSessionKey")
+                if session_key:
+                    print(f"⏳ 等待子智能体完成: {session_key}")
+                    self._wait_for_completion(session_key)
+
         return spawn_config
+
+    def _wait_for_completion(self, session_key: str, poll_interval: int = 30, max_wait: int = 3600):
+        """等待子智能体完成"""
+        waited = 0
+        while waited < max_wait:
+            status = self.subagent_executor.check_status(session_key)
+            if not status.get("running"):
+                print(f"✅ 子智能体已完成: {session_key}")
+                return True
+            print(f"  ... 运行中 ({waited}s)")
+            time.sleep(poll_interval)
+            waited += poll_interval
+        print(f"⏰ 等待超时: {session_key}")
+        return False
 
     def execute_next(self) -> Optional[dict]:
         """执行下一阶段（PDCA 模式）"""
@@ -460,23 +609,26 @@ def main():
         epilog="""
 示例:
   # 查看状态
-  python3 scripts/workflow_executor.py -p my_project --status
+  python3 scripts/workflow.py -p my_project --status
 
-  # 单步执行
-  python3 scripts/workflow_executor.py -p my_project --next
+  # 单步执行（仅生成配置）
+  python3 scripts/workflow.py -p my_project --next
+
+  # 单步执行（实际运行子智能体）
+  python3 scripts/workflow.py -p my_project --next --execute
 
   # 指定阶段
-  python3 scripts/workflow_executor.py -p my_project --stages requirement,design
+  python3 scripts/workflow.py -p my_project --stages requirement,design
 
-  # 完整循环
-  python3 scripts/workflow_executor.py -p my_project --full-cycle
+  # 完整循环（实际执行）
+  python3 scripts/workflow.py -p my_project --full-cycle --execute
 
   # 持续执行
-  python3 scripts/workflow_executor.py -p my_project --start
+  python3 scripts/workflow.py -p my_project --start --execute
 
   # 暂停/恢复
-  python3 scripts/workflow_executor.py -p my_project --pause
-  python3 scripts/workflow_executor.py -p my_project --resume
+  python3 scripts/workflow.py -p my_project --pause
+  python3 scripts/workflow.py -p my_project --resume
         """
     )
 
@@ -489,10 +641,19 @@ def main():
     parser.add_argument("--pause", action="store_true", help="暂停工作流")
     parser.add_argument("--resume", action="store_true", help="恢复工作流")
     parser.add_argument("--reset", action="store_true", help="重置状态")
+    parser.add_argument("--execute", "-e", action="store_true",
+                        help="实际执行子智能体（通过 Gateway HTTP API）")
+    parser.add_argument("--gateway-url", default="http://127.0.0.1:18799",
+                        help="Gateway URL (默认: http://127.0.0.1:18799)")
 
     args = parser.parse_args()
 
-    executor = WorkflowExecutor(project_name=args.project)
+    executor = WorkflowExecutor(
+        project_name=args.project,
+        execute=args.execute
+    )
+    if args.execute and executor.subagent_executor:
+        executor.subagent_executor.gateway_url = args.gateway_url
 
     if args.status:
         result = executor.status()
@@ -510,19 +671,23 @@ def main():
     elif args.stages:
         stages = [s.strip() for s in args.stages.split(",")]
         results = executor.execute_stages(stages)
-        print(f"\n📋 执行结果:")
-        for r in results:
-            print(f"  - [{r['phase'].upper()}] {r['stage']}")
+        if not args.execute:
+            print(f"\n📋 执行结果（仅配置，使用 --execute 实际执行）:")
+            for r in results:
+                print(f"  - [{r['phase'].upper()}] {r['stage']}")
 
     elif args.full_cycle:
         results = executor.execute_full_cycle()
-        print(f"\n📋 生成的任务配置:")
-        print(json.dumps([r["params"] for r in results], indent=2, ensure_ascii=False))
+        if not args.execute:
+            print(f"\n📋 生成的任务配置（使用 --execute 实际执行）:")
+            print(json.dumps([r["params"] for r in results], indent=2, ensure_ascii=False))
+        else:
+            print(f"\n✅ PDCA 循环执行完成")
 
     elif args.next:
         result = executor.execute_next()
-        if result:
-            print(f"\n📋 sessions_spawn 配置:")
+        if result and not args.execute:
+            print(f"\n📋 sessions_spawn 配置（使用 --execute 实际执行）:")
             print(json.dumps(result["params"], indent=2, ensure_ascii=False))
 
     elif args.start:
