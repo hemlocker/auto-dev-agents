@@ -441,10 +441,10 @@ class SubtaskExecutor:
         import copy
         subtask = copy.deepcopy(subtask)
         
-        # 获取变量值
-        package_path = self.project_meta.get("package_path", "com/example/app/")
-        package_name = self.project_meta.get("package_name", "com.example.app")
-        project_name = self.project_meta.get("project_name", "my-project")
+        # 获取变量值（确保不为 None）
+        package_path = self.project_meta.get("package_path") or "com/example/app/"
+        package_name = self.project_meta.get("package_name") or "com.example.app"
+        project_name = self.project_meta.get("project_name") or "my-project"
         
         # 替换函数
         def replace(s):
