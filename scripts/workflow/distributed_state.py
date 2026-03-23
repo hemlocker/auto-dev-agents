@@ -1,11 +1,13 @@
 """
-分布式状态管理 - 支持断点续传和增量更新
+分布式状态管理 - 支持断点续传和版本化增量更新
 
 状态文件分布：
 - project.json                    # 项目元信息
 - input_state.json                # 输入文件状态（哈希）
+- output/manifest.json            # 版本清单
+- output/revision_history.json    # 修订历史
 - output/.stage_status.json       # 阶段执行状态
-- output/{stage}/.subtask_status.json  # 子任务状态（与输出目录同级）
+- output/{stage}/.subtask_status.json  # 子任务状态
 """
 
 import json
@@ -15,6 +17,11 @@ from datetime import datetime
 from typing import Optional, Dict, List, Any, Set
 from dataclasses import dataclass, asdict, field
 import threading
+
+# 导入版本化模块
+from .csv_parser import CSVInputParser, Requirement
+from .manifest import ManifestManager
+from .revision_history import RevisionHistoryManager, ChangeType
 
 
 @dataclass
@@ -66,7 +73,7 @@ class InputChange:
 
 
 class DistributedStateManager:
-    """分布式状态管理器 - 支持断点续传和增量更新"""
+    """分布式状态管理器 - 支持断点续传和版本化增量更新"""
     
     # 输入目录到阶段的映射
     INPUT_TO_STAGE = {
@@ -106,6 +113,11 @@ class DistributedStateManager:
         
         # 确保目录存在
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 版本化管理器
+        self.csv_parser = CSVInputParser(self.input_dir)
+        self.manifest_manager = ManifestManager(self.project_dir)
+        self.revision_manager = RevisionHistoryManager(self.output_dir)
     
     # ========== 项目元信息 ==========
     

@@ -938,7 +938,7 @@ class WorkflowExecutor:
             return None
 
     def execute_stages(self, stages: List[str], incremental: bool = True) -> List[dict]:
-        """执行指定阶段列表（支持增量更新）
+        """执行指定阶段列表（支持版本化增量更新）
         
         Args:
             stages: 要执行的阶段列表
@@ -947,25 +947,27 @@ class WorkflowExecutor:
         Returns:
             执行结果列表
         """
-        results = []
         stage_names = [s.name for s in self.stages]
         
-        # 增量检测
+        # 版本化增量检测
         if incremental:
-            plan = self.dist_state.get_incremental_plan(stages)
+            plan = self.dist_state.get_versioned_incremental_plan(stages)
             
             if plan["mode"] == "none":
-                print(f"\n✅ 输入无变化，跳过执行")
+                print(f"\n✅ {plan['reason']}，跳过执行")
                 return []
             
             if plan["mode"] == "incremental":
-                print(f"\n🔄 增量执行模式")
+                print(f"\n🔄 版本化增量执行模式")
                 print(f"   原因: {plan['reason']}")
-                print(f"   受影响阶段: {', '.join(plan['stages_to_run'])}")
+                print(f"   待处理版本: {', '.join(plan['pending_versions'])}")
                 
-                if plan["changes"].get("stats"):
-                    stats = plan["changes"]["stats"]
-                    print(f"   变化统计: 新增 {stats['new']}, 修改 {stats['modified']}, 删除 {stats['deleted']}")
+                stats = plan.get("stats", {})
+                if stats.get("new_requirements"):
+                    print(f"   新增需求: {stats['new_requirements']} 项")
+                    by_priority = stats.get("by_priority", {})
+                    if by_priority:
+                        print(f"   优先级分布: {by_priority}")
                 
                 stages = plan["stages_to_run"]
                 if not stages:
@@ -973,9 +975,13 @@ class WorkflowExecutor:
                     return []
             else:
                 print(f"\n🚀 全量执行模式: {plan['reason']}")
+                print(f"   版本: {', '.join(plan.get('pending_versions', []))}")
+                print(f"   需求: {len(plan.get('new_requirements', []))} 项")
+                stages = plan["stages_to_run"]
         else:
             print(f"\n🚀 执行指定阶段: {', '.join(stages)}")
 
+        results = []
         for stage in stages:
             if stage not in stage_names:
                 print(f"⚠️ 未知阶段: {stage}，跳过")
@@ -983,6 +989,13 @@ class WorkflowExecutor:
 
             result = self.execute_stage(stage)
             results.append(result)
+            
+            # 记录版本处理
+            if incremental and result.get("success"):
+                self.dist_state.record_version_processed(
+                    version=self.dist_state.manifest_manager.get_latest_version() or "unknown",
+                    requirements_added=len(plan.get("new_requirements", []))
+                )
 
         return results
 
@@ -1188,6 +1201,14 @@ def main():
                         help="强制全量执行（忽略增量检测）")
     parser.add_argument("--reset-incremental", action="store_true", 
                         help="重置增量状态")
+    parser.add_argument("--version-status", action="store_true",
+                        help="显示版本状态")
+    parser.add_argument("--pending-versions", action="store_true",
+                        help="显示待处理版本")
+    parser.add_argument("--reset-version", action="store_true",
+                        help="重置版本状态")
+    parser.add_argument("--validate-input", action="store_true",
+                        help="验证输入数据")
 
     args = parser.parse_args()
 
@@ -1244,6 +1265,29 @@ def main():
 
     elif args.reset_incremental:
         executor.dist_state.reset_incremental_state()
+
+    elif args.reset_version:
+        executor.dist_state.reset_version_state()
+
+    elif args.version_status:
+        print("\n" + "=" * 60)
+        print("📊 版本状态")
+        print("=" * 60)
+        executor.dist_state.print_version_status()
+
+    elif args.pending_versions:
+        plan = executor.dist_state.get_versioned_incremental_plan()
+        print(f"\n📋 待处理版本: {plan.get('pending_versions', [])}")
+        print(f"   新增需求: {len(plan.get('new_requirements', []))}")
+
+    elif args.validate_input:
+        result = executor.dist_state.csv_parser.validate_input()
+        print(f"\n✅ 输入验证: {'通过' if result['valid'] else '失败'}")
+        if result['errors']:
+            print(f"❌ 错误: {result['errors']}")
+        if result['warnings']:
+            print(f"⚠️ 警告: {result['warnings']}")
+        print(f"\n📊 统计: {result['stats']}")
 
     elif args.stages or args.from_stage or args.until_stage:
         # 确定是否使用增量模式
