@@ -11,7 +11,7 @@ projects:
 # PDCA 循环配置
 pdca:
   # 循环间隔（秒）
-  cycle_interval_seconds: 300  # 5 分钟
+  cycle_interval_seconds: 60  # 1 分钟
   
   # 自动循环
   auto_loop: true
@@ -24,8 +24,8 @@ execution:
   # 自动执行模式：无需对话
   mode: "auto"
   
-  # 阶段延迟（秒）- 设置为 0 立即执行下一阶段
-  stage_delay_seconds: 0
+  # 阶段延迟（秒）
+  stage_delay_seconds: 30
   
   # 超时（秒）
   timeout_seconds: 1800  # 30 分钟
