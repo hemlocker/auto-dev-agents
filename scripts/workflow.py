@@ -11,23 +11,23 @@ Workflow Executor
 
 使用方式：
   # 查看状态
-  python3 scripts/workflow_executor.py --project my_project --status
+  python3 scripts/workflow.py --project my_project --status
 
   # 单步执行下一阶段
-  python3 scripts/workflow_executor.py --project my_project --next
+  python3 scripts/workflow.py --project my_project --next
 
   # 指定阶段运行
-  python3 scripts/workflow_executor.py --project my_project --stages requirement,design
+  python3 scripts/workflow.py --project my_project --stages requirement,design
 
   # 运行完整 PDCA 循环
-  python3 scripts/workflow_executor.py --project my_project --full-cycle
+  python3 scripts/workflow.py --project my_project --full-cycle
 
   # 启动持续自动执行
-  python3 scripts/workflow_executor.py --project my_project --start
+  python3 scripts/workflow.py --project my_project --start
 
   # 暂停/恢复
-  python3 scripts/workflow_executor.py --project my_project --pause
-  python3 scripts/workflow_executor.py --project my_project --resume
+  python3 scripts/workflow.py --project my_project --pause
+  python3 scripts/workflow.py --project my_project --resume
 """
 
 import argparse
@@ -44,6 +44,37 @@ from typing import Optional, Dict, List, Tuple
 # Gateway HTTP API 配置
 GATEWAY_URL = "http://127.0.0.1:18799"
 GATEWAY_TOKEN = None  # 从环境变量或配置读取
+
+
+# ==================== 自定义异常 ====================
+
+class WorkflowError(Exception):
+    """工作流基础异常"""
+    pass
+
+
+class StageExecutionError(WorkflowError):
+    """阶段执行异常"""
+    def __init__(self, stage: str, message: str):
+        self.stage = stage
+        self.message = message
+        super().__init__(f"[{stage}] {message}")
+
+
+class StageTimeoutError(WorkflowError):
+    """阶段超时异常"""
+    def __init__(self, stage: str, timeout: int):
+        self.stage = stage
+        self.timeout = timeout
+        super().__init__(f"[{stage}] 执行超时 ({timeout}s)")
+
+
+class DependencyError(WorkflowError):
+    """依赖检查异常"""
+    def __init__(self, stage: str, missing_input: str):
+        self.stage = stage
+        self.missing_input = missing_input
+        super().__init__(f"[{stage}] 缺少前置输入: {missing_input}")
 
 
 class SubagentExecutor:
@@ -365,16 +396,44 @@ class WorkflowExecutor:
 
     # ==================== 执行模式 ====================
 
-    def execute_stage(self, stage: str, phase: str = None, wait: bool = True) -> dict:
+    def _check_dependencies(self, stage: str) -> Tuple[bool, Optional[str]]:
+        """检查前置阶段输出是否存在
+        
+        Returns:
+            Tuple[bool, Optional[str]]: (是否通过, 缺失的输入路径)
+        """
+        input_path = self.INPUT_MAP.get(stage)
+        if not input_path:
+            return True, None
+        
+        full_path = self.project_dir / input_path
+        if not full_path.exists():
+            return False, str(full_path)
+        
+        # 检查目录是否为空（requirement 阶段除外）
+        if stage != "requirement" and full_path.is_dir():
+            if not any(full_path.iterdir()):
+                return False, f"{full_path} (目录为空)"
+        
+        return True, None
+
+    def execute_stage(self, stage: str, phase: str = None, wait: bool = True, 
+                      skip_dependency_check: bool = False) -> dict:
         """执行单个阶段
 
         Args:
             stage: 阶段名称
             phase: PDCA 阶段
             wait: 是否等待子智能体完成（仅当 execute=True 时有效）
+            skip_dependency_check: 是否跳过依赖检查
 
         Returns:
             dict: 执行结果
+            
+        Raises:
+            DependencyError: 前置阶段输出不存在
+            StageExecutionError: 子智能体启动失败
+            StageTimeoutError: 子智能体执行超时
         """
         if phase is None:
             # 根据 stage 推断 phase
@@ -385,7 +444,14 @@ class WorkflowExecutor:
             if phase is None:
                 phase = "custom"
 
+        # 依赖检查
+        if self.execute and not skip_dependency_check:
+            passed, missing = self._check_dependencies(stage)
+            if not passed:
+                raise DependencyError(stage, missing)
+
         spawn_config = self._generate_spawn_config(stage, phase)
+        start_time = time.time()
 
         print(f"\n{'='*60}")
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 执行阶段")
@@ -409,9 +475,12 @@ class WorkflowExecutor:
             )
 
             if not result.get("ok"):
-                print(f"❌ 启动失败: {result.get('error')}")
+                error_msg = result.get("error", "未知错误")
+                print(f"❌ 启动失败: {error_msg}")
                 spawn_config["spawn_result"] = result
-                return spawn_config
+                spawn_config["duration"] = time.time() - start_time
+                spawn_config["success"] = False
+                raise StageExecutionError(stage, error_msg)
 
             spawn_config["spawn_result"] = result
 
@@ -420,8 +489,14 @@ class WorkflowExecutor:
                 session_key = result.get("result", {}).get("childSessionKey")
                 if session_key:
                     print(f"⏳ 等待子智能体完成: {session_key}")
-                    self._wait_for_completion(session_key)
+                    completed = self._wait_for_completion(session_key)
+                    if not completed:
+                        spawn_config["duration"] = time.time() - start_time
+                        spawn_config["success"] = False
+                        raise StageTimeoutError(stage, 3600)
 
+        spawn_config["duration"] = time.time() - start_time
+        spawn_config["success"] = True
         return spawn_config
 
     def _wait_for_completion(self, session_key: str, poll_interval: int = 10, max_wait: int = 3600):
@@ -481,8 +556,18 @@ class WorkflowExecutor:
 
         return results
 
-    def execute_full_cycle(self) -> List[dict]:
-        """执行完整 PDCA 循环（一次性生成所有任务）"""
+    def execute_full_cycle(self) -> dict:
+        """执行完整 PDCA 循环
+        
+        Returns:
+            dict: 执行结果统计，包含:
+                - total: 总阶段数
+                - success: 成功数
+                - failed: 失败数
+                - duration: 总耗时（秒）
+                - stages: 各阶段结果
+                - error: 失败阶段错误信息（如有）
+        """
         # 重置状态
         self._save_state({
             "cycle": 1,
@@ -492,30 +577,113 @@ class WorkflowExecutor:
             "history": []
         })
 
-        results = []
+        stats = {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+            "duration": 0,
+            "stages": [],
+            "error": None
+        }
+        start_time = time.time()
+        
         print(f"\n🔄 执行完整 PDCA 循环")
+        print(f"   PLAN: {', '.join(self.STAGE_MAP['plan'])}")
+        print(f"   DO: {', '.join(self.STAGE_MAP['do'])}")
+        print(f"   CHECK: {', '.join(self.STAGE_MAP['check'])}")
+        print(f"   ACT: {', '.join(self.STAGE_MAP['act'])}")
 
-        for phase in self.PHASE_ORDER:
-            for stage in self.STAGE_MAP[phase]:
-                result = self.execute_stage(stage, phase)
-                results.append(result)
+        try:
+            for phase in self.PHASE_ORDER:
+                for stage in self.STAGE_MAP[phase]:
+                    stats["total"] += 1
+                    
+                    try:
+                        result = self.execute_stage(stage, phase)
+                        result["phase"] = phase
+                        stats["stages"].append(result)
+                        stats["success"] += 1
+                        
+                        # 更新状态
+                        state = self._read_state()
+                        state["current_phase"] = phase
+                        state["current_stage"] = stage
+                        self._save_state(state)
+                        
+                    except DependencyError as e:
+                        print(f"⚠️ 依赖检查失败: {e}")
+                        stats["stages"].append({
+                            "stage": stage,
+                            "phase": phase,
+                            "success": False,
+                            "error": str(e),
+                            "error_type": "dependency"
+                        })
+                        stats["failed"] += 1
+                        stats["error"] = str(e)
+                        # 依赖缺失，终止执行
+                        raise
+                        
+                    except StageExecutionError as e:
+                        print(f"❌ 阶段执行失败: {e}")
+                        stats["stages"].append({
+                            "stage": stage,
+                            "phase": phase,
+                            "success": False,
+                            "error": str(e),
+                            "error_type": "execution"
+                        })
+                        stats["failed"] += 1
+                        stats["error"] = str(e)
+                        # 执行失败，终止执行
+                        raise
+                        
+                    except StageTimeoutError as e:
+                        print(f"⏰ 阶段执行超时: {e}")
+                        stats["stages"].append({
+                            "stage": stage,
+                            "phase": phase,
+                            "success": False,
+                            "error": str(e),
+                            "error_type": "timeout"
+                        })
+                        stats["failed"] += 1
+                        stats["error"] = str(e)
+                        # 超时，终止执行
+                        raise
 
-                # 更新状态
-                state = self._read_state()
-                state["current_phase"] = phase
-                state["current_stage"] = stage
-                self._save_state(state)
+        except WorkflowError:
+            # 工作流错误已记录，继续返回统计
+            pass
 
         # 标记完成
+        stats["duration"] = time.time() - start_time
+        
         state = self._read_state()
-        state["history"].append({
-            "cycle": state["cycle"],
-            "completed_at": datetime.now().isoformat()
-        })
-        self._save_state(state)
+        if stats["failed"] == 0:
+            state["history"].append({
+                "cycle": state["cycle"],
+                "completed_at": datetime.now().isoformat(),
+                "duration": stats["duration"]
+            })
+            self._save_state(state)
+            print(f"\n✅ PDCA 循环完成")
+        else:
+            state["history"].append({
+                "cycle": state["cycle"],
+                "failed_at": datetime.now().isoformat(),
+                "error": stats["error"]
+            })
+            self._save_state(state)
+            print(f"\n❌ PDCA 循环中断: {stats['error']}")
 
-        print(f"\n✅ PDCA 循环完成，共 {len(results)} 个阶段")
-        return results
+        print(f"   总计: {stats['total']} 阶段")
+        print(f"   成功: {stats['success']}")
+        print(f"   失败: {stats['failed']}")
+        print(f"   耗时: {stats['duration']:.1f}s")
+        
+        return stats
 
     def run_continuous(self):
         """持续运行（自动循环执行）"""
@@ -685,12 +853,11 @@ def main():
                 print(f"  - [{r['phase'].upper()}] {r['stage']}")
 
     elif args.full_cycle:
-        results = executor.execute_full_cycle()
+        stats = executor.execute_full_cycle()
         if not args.execute:
             print(f"\n📋 生成的任务配置（使用 --execute 实际执行）:")
-            print(json.dumps([r["params"] for r in results], indent=2, ensure_ascii=False))
-        else:
-            print(f"\n✅ PDCA 循环执行完成")
+            print(json.dumps([s.get("params") for s in stats.get("stages", []) if s.get("params")], 
+                           indent=2, ensure_ascii=False))
 
     elif args.next:
         result = executor.execute_next()
