@@ -331,7 +331,7 @@ class SubtaskExecutor:
     }
     
     def generate_subtask_prompt(self, subtask: dict, context: dict) -> str:
-        """生成子任务提示词（包含增量输出）"""
+        """生成子任务提示词（包含增量输出和边界限制）"""
         base_prompt = self._load_stage_prompt()
         
         # 构建上下文信息：包含已完成的子任务输出
@@ -351,23 +351,47 @@ class SubtaskExecutor:
                     if dep_result.get("summary"):
                         context_info += f"  （{dep_result['summary']}）\n"
         
-        # 输出限制
+        # 输出限制 - 支持多种格式
         output_limit = ""
-        if subtask.get("output_files"):
-            output_limit = f"\n## 本次输出文件\n只需输出以下文件: {', '.join(subtask['output_files'])}"
-        elif subtask.get("output_dir"):
-            output_limit = f"\n## 本次输出目录\n只需输出到: {subtask['output_dir']}"
         
-        # 添加排除规则
+        # 优先使用 output_dirs（多个目录）
+        if subtask.get("output_dirs"):
+            dirs = subtask["output_dirs"]
+            output_limit = f"\n## 本次输出目录\n只输出到以下目录:\n"
+            for d in dirs:
+                output_limit += f"- {d}\n"
+        # 其次使用 output_dir（单个目录）
+        elif subtask.get("output_dir"):
+            output_limit = f"\n## 本次输出目录\n只输出到: {subtask['output_dir']}"
+        # 最后使用 output_files（指定文件）
+        elif subtask.get("output_files"):
+            output_limit = f"\n## 本次输出文件\n只需输出以下文件: {', '.join(subtask['output_files'])}"
+        
+        # 排除规则 - 优先从子任务定义读取，否则使用默认规则
         exclusion_info = ""
         subtask_name = subtask.get("name", "")
-        if subtask_name in self.SUBTASK_EXCLUSIONS:
+        
+        # 从子任务定义中读取排除规则
+        excludes = subtask.get("excludes", [])
+        if excludes:
+            exclusion_info = f"\n## ⚠️ 输出边界限制\n"
+            exclusion_info += f"不要输出以下类型的代码或目录:\n"
+            for exc in excludes:
+                exclusion_info += f"- ❌ {exc}/\n"
+        # 或使用默认规则
+        elif subtask_name in self.SUBTASK_EXCLUSIONS:
             rules = self.SUBTASK_EXCLUSIONS[subtask_name]
             exclusion_info = f"\n## ⚠️ 输出边界限制\n{rules['message']}\n"
             if rules.get("exclude_dirs"):
                 exclusion_info += f"- 不要创建以下目录: {', '.join(rules['exclude_dirs'])}\n"
             if rules.get("exclude_files"):
                 exclusion_info += f"- 不要输出以下类型文件: {', '.join(rules['exclude_files'])}\n"
+        
+        # 计算实际的输出根目录
+        output_root = self.output_dir
+        if subtask.get("output_dirs"):
+            # 多个目录时，输出根目录是项目的 src/ 目录
+            output_root = self.output_dir.parent / "src"
         
         return f"""# 子任务: {subtask['name']}
 
@@ -381,8 +405,8 @@ class SubtaskExecutor:
 {context_info}
 {output_limit}
 {exclusion_info}
-## 输出目录
-{self.output_dir}
+## 输出根目录
+{output_root}
 
 ## 增量执行要求
 1. **读取前置输出**: 先读取依赖子任务生成的文件

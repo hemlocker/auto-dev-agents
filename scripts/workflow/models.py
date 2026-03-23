@@ -143,30 +143,33 @@ STAGE_SUBTASKS = {
         },
         {
             "name": "models",
-            "description": "创建数据模型",
+            "description": "创建数据模型（entity、dto、vo、enums）",
             "depends_on": ["project_structure"],
-            "output_dir": "src/models/",
+            "output_dirs": ["src/entity/", "src/dto/", "src/vo/", "src/enums/"],
+            "excludes": ["repository", "repositories", "service", "services", "controller", "controllers"],
             "max_tokens_estimate": 8000
         },
         {
             "name": "repositories",
-            "description": "创建数据访问层",
+            "description": "创建数据访问层（Repository 接口）",
             "depends_on": ["models"],
-            "output_dir": "src/repositories/",
+            "output_dir": "src/repository/",
+            "excludes": ["service", "services", "controller", "controllers"],
             "max_tokens_estimate": 6000
         },
         {
             "name": "services",
-            "description": "创建业务逻辑层",
+            "description": "创建业务逻辑层（Service 接口和实现）",
             "depends_on": ["repositories"],
-            "output_dir": "src/services/",
+            "output_dir": "src/service/",
+            "excludes": ["controller", "controllers"],
             "max_tokens_estimate": 10000
         },
         {
             "name": "controllers",
-            "description": "创建控制器层",
+            "description": "创建控制器层（Controller 接口）",
             "depends_on": ["services"],
-            "output_dir": "src/controllers/",
+            "output_dir": "src/controller/",
             "max_tokens_estimate": 8000
         },
         {
