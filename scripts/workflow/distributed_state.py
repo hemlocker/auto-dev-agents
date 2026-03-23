@@ -114,7 +114,11 @@ class DistributedStateManager:
         if self.project_meta_file.exists():
             try:
                 data = json.loads(self.project_meta_file.read_text(encoding="utf-8"))
-                return ProjectMeta(**data)
+                # 只提取 ProjectMeta 定义的字段
+                valid_fields = {"name", "project_name", "package_name", "package_path", 
+                               "backend_language", "frontend_framework", "created_at", "updated_at"}
+                filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+                return ProjectMeta(**filtered_data)
             except Exception as e:
                 print(f"⚠️ 加载项目元信息失败: {e}")
         
@@ -600,14 +604,16 @@ class DistributedStateManager:
         if stages_to_run:
             affected_stages = [s for s in affected_stages if s in stages_to_run]
         
-        # 获取需要重跑的子任务
+        # 🔧 关键改进：输入变化时，重置受影响阶段的所有子任务状态
+        # 这样断点续传会重新执行这些子任务
+        for stage in affected_stages:
+            self._reset_stage_subtasks(stage)
+        
+        # 获取需要执行的子任务（现在会返回全部子任务）
         subtasks_to_run = {}
         for stage in affected_stages:
-            pending = self.get_pending_subtasks(stage, self._get_stage_subtasks(stage))
-            if pending:
-                subtasks_to_run[stage] = pending
-            elif change_result["affected_subtasks"].get(stage):
-                subtasks_to_run[stage] = change_result["affected_subtasks"][stage]
+            all_subtasks = self._get_stage_subtasks(stage)
+            subtasks_to_run[stage] = all_subtasks  # 输入变化时执行所有子任务
         
         return {
             "mode": "incremental",
@@ -616,6 +622,31 @@ class DistributedStateManager:
             "subtasks_to_run": subtasks_to_run,
             "changes": change_result
         }
+    
+    def _reset_stage_subtasks(self, stage: str):
+        """重置阶段的所有子任务状态（用于增量更新）
+        
+        当输入变化时，需要重新执行该阶段的所有子任务
+        """
+        status_file = self.get_subtask_status_file(stage)
+        
+        if status_file.exists():
+            try:
+                data = json.loads(status_file.read_text(encoding="utf-8"))
+                # 将所有子任务状态重置为 pending
+                for subtask_name, subtask_data in data.get("subtasks", {}).items():
+                    subtask_data["status"] = "pending"
+                    subtask_data["started_at"] = None
+                    subtask_data["completed_at"] = None
+                    subtask_data["duration_ms"] = None
+                
+                status_file.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8"
+                )
+                print(f"   🔄 已重置阶段 {stage} 的子任务状态")
+            except Exception as e:
+                print(f"   ⚠️ 重置阶段 {stage} 子任务状态失败: {e}")
     
     def _get_stage_subtasks(self, stage: str) -> List[str]:
         """获取阶段的所有子任务名称"""

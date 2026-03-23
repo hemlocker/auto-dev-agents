@@ -1,0 +1,15 @@
+id,version,title,type,priority,status,module,role,description,acceptance_criteria,notes
+UR-001,v1.0,设备列表展示,functional,Must,active,设备管理,管理员,"用户希望查看设备列表，支持分页和筛选功能","显示设备编号、名称、类型、状态;支持按类型筛选;支持关键词搜索;支持分页（每页10条）",核心功能
+UR-002,v1.0,新增设备,functional,Must,active,设备管理,管理员,"用户希望新增设备信息","填写设备编号、名称、类型、状态;设备编号唯一性校验;保存成功提示",核心功能
+UR-003,v1.0,编辑设备,functional,Must,active,设备管理,管理员,"用户希望编辑设备信息","修改设备信息;记录修改时间;修改成功提示",核心功能
+UR-004,v1.0,删除设备,functional,Must,active,设备管理,管理员,"用户希望删除设备","删除确认弹窗;删除成功提示;已删除设备不显示在列表",核心功能
+UR-005,v1.0,设备详情查看,functional,Must,active,设备管理,管理员,"用户希望查看设备详细信息","显示设备所有字段;显示关联信息",核心功能
+UR-006,v1.0,分页功能,functional,Must,active,设备管理,所有用户,"列表支持分页","每页10条;显示总条数;支持跳转页码",核心功能
+UR-007,v1.0,按类型筛选,functional,Must,active,设备管理,所有用户,"支持按设备类型筛选","下拉选择类型;筛选结果即时显示",核心功能
+UR-008,v1.0,按状态筛选,functional,Must,active,设备管理,所有用户,"支持按设备状态筛选","下拉选择状态;筛选结果即时显示",核心功能
+UR-009,v1.0,关键词搜索,functional,Must,active,设备管理,所有用户,"支持关键词搜索设备","输入关键词;搜索设备编号和名称;实时搜索",核心功能
+UR-010,v1.0,删除确认,functional,Must,active,设备管理,管理员,"删除前需要确认","弹出确认框;确认后才能删除",核心功能
+NFR-001,v1.0,页面响应时间,non-functional,Must,active,系统,所有用户,"页面响应时间要求","页面加载时间 < 2秒;API响应时间 < 500ms",性能要求
+NFR-002,v1.0,并发用户,non-functional,Must,active,系统,所有用户,"系统支持的并发用户数","支持 500 并发用户;系统正常运行",性能要求
+NFR-003,v1.0,浏览器兼容,non-functional,Must,active,系统,所有用户,"支持的浏览器","Chrome 90+;Firefox 88+;Safari 14+",兼容性要求
+NFR-004,v1.0,数据安全,non-functional,Must,active,系统,管理员,"数据安全要求","用户密码加密存储;敏感数据脱敏;操作日志记录",安全要求

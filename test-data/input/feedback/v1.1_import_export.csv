@@ -1,0 +1,6 @@
+id,version,title,type,priority,status,module,role,description,acceptance_criteria,notes
+UR-011,v1.1,Excel批量导入,functional,Should,active,设备管理,管理员,"用户希望通过Excel批量导入设备","下载导入模板;上传Excel文件;显示导入结果;错误数据提示",导入导出
+UR-012,v1.1,设备数据导出,functional,Should,active,设备管理,管理员,"用户希望导出设备数据","选择导出格式（Excel/CSV）;按条件筛选导出;导出成功提示",导入导出
+UR-013,v1.1,导入模板下载,functional,Should,active,设备管理,管理员,"用户希望下载导入模板","下载Excel模板;模板包含示例数据",导入导出
+UR-014,v1.1,导入结果预览,functional,Should,active,设备管理,管理员,"用户希望预览导入结果","显示成功条数;显示失败条数;失败原因说明",导入导出
+UR-015,v1.1,CSV导入支持,functional,Could,active,设备管理,管理员,"用户希望支持CSV格式导入","上传CSV文件;UTF-8编码;导入结果提示",导入导出
