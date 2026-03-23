@@ -292,6 +292,276 @@ SUBTASK_TEMPLATES = {
 }
 
 
+# ==================== 模块依赖推断规则 ====================
+
+DEPENDENCY_INFERENCE_RULES = [
+    # 规则1: 外键/关联关系
+    {
+        "name": "foreign_key",
+        "patterns": [
+            r"(\w+?)需要关联(\w+)",
+            r"(\w+?)关联到(\w+)",
+            r"(\w+?)属于(\w+)",
+            r"(\w+?)的(\w+)",
+        ],
+        "dependency_type": "foreign_key",
+        "extract": lambda m: (m.group(1), m.group(2))
+    },
+    
+    # 规则2: 包含/组合关系
+    {
+        "name": "composition",
+        "patterns": [
+            r"(\w+?)包含(\w+)",
+            r"(\w+?)有多个(\w+)",
+            r"(\w+?)下的(\w+)",
+        ],
+        "dependency_type": "composition",
+        "extract": lambda m: (m.group(1), m.group(2))
+    },
+    
+    # 规则3: 操作/引用关系
+    {
+        "name": "reference",
+        "patterns": [
+            r"(\w+?)需要(\w+?)信息",
+            r"(\w+?)调用(\w+)",
+            r"(\w+?)使用(\w+)",
+        ],
+        "dependency_type": "reference",
+        "extract": lambda m: (m.group(1), m.group(2))
+    },
+    
+    # 规则4: 常见业务模式（自动依赖）
+    {
+        "name": "business_pattern",
+        "module_patterns": {
+            "order": {"auto_deps": ["user"], "reason": "订单通常需要用户"},
+            "订单": {"auto_deps": ["user", "用户"], "reason": "订单需要用户信息"},
+            "comment": {"auto_deps": ["user"], "reason": "评论需要用户"},
+            "评论": {"auto_deps": ["user", "用户"], "reason": "评论需要用户"},
+            "repair": {"auto_deps": ["user", "device"], "reason": "维修需要用户和设备"},
+            "维修": {"auto_deps": ["user", "device", "用户", "设备"], "reason": "维修需要用户和设备"},
+            "log": {"auto_deps": ["user"], "reason": "日志通常需要用户"},
+            "日志": {"auto_deps": ["user", "用户"], "reason": "日志需要用户"},
+        }
+    }
+]
+
+# 常见模块名称映射（标准化）
+MODULE_NAME_MAPPING = {
+    "用户": "user",
+    "设备": "device",
+    "订单": "order",
+    "评论": "comment",
+    "维修": "repair",
+    "日志": "log",
+    "通知": "notification",
+    "消息": "message",
+    "配置": "config",
+    "权限": "permission",
+    "角色": "role",
+}
+
+
+class ModuleDependencyAnalyzer:
+    """模块依赖分析器"""
+    
+    def __init__(self, rules: List[dict] = None):
+        self.rules = rules or DEPENDENCY_INFERENCE_RULES
+        self.name_mapping = MODULE_NAME_MAPPING
+    
+    def normalize_name(self, name: str) -> str:
+        """标准化模块名称"""
+        name = name.lower().strip()
+        return self.name_mapping.get(name, name)
+    
+    def extract_modules(self, text: str) -> List[str]:
+        """从文本中提取模块名称"""
+        import re
+        
+        # 常见模块关键词
+        module_keywords = list(self.name_mapping.keys()) + list(self.name_mapping.values())
+        
+        found = set()
+        for keyword in module_keywords:
+            if keyword in text:
+                found.add(self.normalize_name(keyword))
+        
+        # 添加中文关键词的英文映射
+        for cn, en in self.name_mapping.items():
+            if cn in text:
+                found.add(en)
+        
+        return list(found)
+    
+    def infer_dependencies(self, text: str, modules: List[str] = None) -> dict:
+        """推断模块依赖关系
+        
+        Args:
+            text: 需求文本
+            modules: 已识别的模块列表（可选，不传则自动提取）
+        
+        Returns:
+            dict: {module_name: {"dependencies": [...], "inferred_from": [...]}}
+        """
+        import re
+        
+        if modules is None:
+            modules = self.extract_modules(text)
+        
+        dependencies = {m: {"dependencies": set(), "reasons": []} for m in modules}
+        
+        # 应用规则推断
+        for rule in self.rules:
+            if rule["name"] == "business_pattern":
+                # 业务模式规则
+                for module in modules:
+                    if module in rule["module_patterns"]:
+                        pattern = rule["module_patterns"][module]
+                        for dep in pattern["auto_deps"]:
+                            dep_normalized = self.normalize_name(dep)
+                            if dep_normalized in modules and dep_normalized != module:
+                                dependencies[module]["dependencies"].add(dep_normalized)
+                                dependencies[module]["reasons"].append(pattern["reason"])
+            else:
+                # 模式匹配规则
+                for pattern in rule["patterns"]:
+                    for match in re.finditer(pattern, text):
+                        try:
+                            source, target = rule["extract"](match)
+                            source = self.normalize_name(source)
+                            target = self.normalize_name(target)
+                            
+                            if source in modules and target in modules:
+                                dependencies[source]["dependencies"].add(target)
+                                dependencies[source]["reasons"].append(
+                                    f"{rule['name']}: {match.group(0)}"
+                                )
+                        except:
+                            continue
+        
+        # 转换为列表
+        for m in dependencies:
+            dependencies[m]["dependencies"] = list(dependencies[m]["dependencies"])
+        
+        return dependencies
+    
+    def build_dependency_graph(self, modules_info: List[dict]) -> Dict[str, List[str]]:
+        """构建依赖图
+        
+        Args:
+            modules_info: [{"name": "user", "dependencies": []}, ...]
+        
+        Returns:
+            dict: {module: [dep1, dep2, ...]}
+        """
+        graph = {}
+        for module in modules_info:
+            graph[module["name"]] = module.get("dependencies", [])
+        return graph
+    
+    def topological_sort(self, graph: Dict[str, List[str]]) -> List[str]:
+        """拓扑排序
+        
+        Returns:
+            List[str]: 开发顺序（依赖在前）
+        """
+        visited = set()
+        result = []
+        
+        def visit(node):
+            if node in visited:
+                return
+            visited.add(node)
+            for dep in graph.get(node, []):
+                visit(dep)
+            result.append(node)
+        
+        for node in graph:
+            visit(node)
+        
+        return result
+    
+    def get_parallel_groups(self, graph: Dict[str, List[str]]) -> List[List[str]]:
+        """获取可并行执行的模块组
+        
+        Returns:
+            List[List[str]]: [[batch1_modules], [batch2_modules], ...]
+        """
+        groups = []
+        remaining = set(graph.keys())
+        completed = set()
+        
+        while remaining:
+            # 找出所有依赖已满足的模块
+            ready = []
+            for node in list(remaining):
+                deps = set(graph.get(node, []))
+                if deps.issubset(completed):
+                    ready.append(node)
+            
+            if not ready:
+                # 循环依赖
+                raise ValueError(f"检测到循环依赖: {remaining}")
+            
+            groups.append(sorted(ready))  # 排序保证可重复性
+            for node in ready:
+                remaining.remove(node)
+                completed.add(node)
+        
+        return groups
+    
+    def analyze(self, text: str, modules: List[str] = None, 
+                priorities: Dict[str, str] = None) -> dict:
+        """完整分析：提取模块、推断依赖、计算开发顺序
+        
+        Args:
+            text: 需求文本
+            modules: 已识别的模块（可选）
+            priorities: 模块优先级 {"user": "P0", ...}
+        
+        Returns:
+            dict: 完整的分析结果
+        """
+        # 1. 提取/使用模块
+        if modules is None:
+            modules = self.extract_modules(text)
+        
+        # 2. 推断依赖
+        deps = self.infer_dependencies(text, modules)
+        
+        # 3. 构建模块信息
+        modules_info = []
+        for m in modules:
+            info = {
+                "name": m,
+                "dependencies": deps[m]["dependencies"],
+                "inferred_from": deps[m]["reasons"],
+                "priority": (priorities or {}).get(m, "P1")
+            }
+            modules_info.append(info)
+        
+        # 4. 构建依赖图
+        graph = self.build_dependency_graph(modules_info)
+        
+        # 5. 计算开发顺序
+        order = self.topological_sort(graph)
+        parallel_groups = self.get_parallel_groups(graph)
+        
+        return {
+            "modules": modules_info,
+            "dependency_graph": graph,
+            "development_order": order,
+            "parallel_groups": parallel_groups,
+            "analysis_summary": {
+                "total_modules": len(modules),
+                "total_batches": len(parallel_groups),
+                "max_parallelism": max(len(g) for g in parallel_groups) if parallel_groups else 0
+            }
+        }
+
+
 def get_subtasks_for_project(project_type: str = "fullstack", custom_subtasks: dict = None) -> dict:
     """根据项目类型获取子任务定义
     
