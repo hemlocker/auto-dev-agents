@@ -177,8 +177,9 @@ class DistributedStateManager:
     
     def get_subtask_status_file(self, stage: str) -> Path:
         """获取子任务状态文件路径"""
-        # 根据 stage 确定目录
+        # 根据 stage 确定目录（stage 名称 -> 输出目录名）
         stage_output_map = {
+            "requirement": "requirements",   # 单数 stage 名映射到复数目录
             "requirements": "requirements",
             "design": "design",
             "development": "src",
