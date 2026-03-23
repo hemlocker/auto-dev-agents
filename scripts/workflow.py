@@ -51,7 +51,28 @@ except ImportError:
 
 # Gateway HTTP API 配置
 GATEWAY_URL = "http://127.0.0.1:18799"
-GATEWAY_TOKEN = None  # 从环境变量或配置读取
+GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", None)
+
+
+def _load_gateway_token() -> Optional[str]:
+    """从 OpenClaw 配置文件读取 Gateway token"""
+    config_path = Path.home() / ".openclaw" / "openclaw.json"
+    if config_path.exists():
+        try:
+            import json
+            with open(config_path, "r") as f:
+                config = json.load(f)
+                auth = config.get("gateway", {}).get("auth", {})
+                if auth.get("mode") == "token":
+                    return auth.get("token")
+        except:
+            pass
+    return None
+
+
+# 自动加载 Gateway token
+if not GATEWAY_TOKEN:
+    GATEWAY_TOKEN = _load_gateway_token()
 
 
 # ==================== 数据类定义 ====================
@@ -217,11 +238,16 @@ class SubagentExecutor:
         
         if result.get("status_code") == 200:
             data = result.get("json", {})
-            if data.get("ok") and data.get("result"):
-                for sub in data["result"].get("active", []):
+            if data.get("ok"):
+                # 从 details 中获取 active 和 recent 列表
+                details = data.get("result", {}).get("details", {})
+                if not details:
+                    details = data.get("result", {})
+                
+                for sub in details.get("active", []):
                     if sub.get("sessionKey") == session_key:
                         return {"running": True, "info": sub}
-                for sub in data["result"].get("recent", []):
+                for sub in details.get("recent", []):
                     if sub.get("sessionKey") == session_key:
                         return {"running": False, "info": sub}
             return {"running": False, "info": None}
@@ -577,7 +603,13 @@ class WorkflowExecutor:
 
             if wait:
                 # 等待子智能体完成
-                session_key = result.get("result", {}).get("childSessionKey")
+                # childSessionKey 在 result.details 中
+                result_data = result.get("result", {})
+                if "details" in result_data:
+                    session_key = result_data["details"].get("childSessionKey")
+                else:
+                    session_key = result_data.get("childSessionKey")
+                    
                 if session_key:
                     print(f"⏳ 等待子智能体完成: {session_key}")
                     completed = self._wait_for_completion(session_key)
