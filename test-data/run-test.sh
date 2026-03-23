@@ -62,7 +62,7 @@ run_full_cycle() {
     echo ""
     
     cd "$(dirname "$SCRIPT_DIR")"
-    python3 scripts/workflow.py -p "$PROJECT_NAME" --full-cycle --execute
+    python3 scripts/run.py -p "$PROJECT_NAME" --full-cycle --execute
 }
 
 # 主逻辑
