@@ -81,6 +81,9 @@ class WorkflowExecutor:
         # 模块信息（从需求阶段读取）
         self.modules = []
         
+        # 项目元信息（从需求阶段读取，包含包名等）
+        self.project_meta = {}
+        
         # 加载阶段配置
         self.stages = self._load_stages(template, stages_override)
         self.stage_map = {s.name: s for s in self.stages}
@@ -178,6 +181,125 @@ class WorkflowExecutor:
                 pass
         
         return []
+    
+    def _load_project_meta(self) -> dict:
+        """从需求阶段输出加载项目元信息
+        
+        包含：项目名称、包名、技术栈等
+        
+        Returns:
+            dict: {
+                "project_name": "device-management",
+                "package_name": "com.example.device",
+                "package_path": "com/example/device/",
+                "backend_language": "java",
+                "frontend_framework": "vue",
+                ...
+            }
+        """
+        # 尝试从 project.json 读取
+        project_file = self.output_dir / "project.json"
+        if project_file.exists():
+            try:
+                return json.loads(project_file.read_text(encoding="utf-8"))
+            except:
+                pass
+        
+        # 尝试从需求阶段的软件需求文档提取
+        sw_req_file = self.output_dir / "requirements" / "software_requirements.md"
+        if sw_req_file.exists():
+            content = sw_req_file.read_text(encoding="utf-8")
+            meta = self._extract_meta_from_requirements(content)
+            if meta:
+                return meta
+        
+        # 尝试从架构设计文档提取
+        arch_file = self.output_dir / "design" / "architecture_design.md"
+        if arch_file.exists():
+            content = arch_file.read_text(encoding="utf-8")
+            meta = self._extract_meta_from_architecture(content)
+            if meta:
+                return meta
+        
+        # 默认值：从项目名称生成
+        return self._generate_default_meta()
+    
+    def _extract_meta_from_requirements(self, content: str) -> Optional[dict]:
+        """从需求文档提取项目元信息"""
+        import re
+        
+        meta = {}
+        
+        # 提取项目名称
+        name_match = re.search(r'项目名称[：:]\s*(.+?)(?:\n|$)', content)
+        if name_match:
+            meta["project_name"] = name_match.group(1).strip()
+        
+        # 提取包名（如果有）
+        package_match = re.search(r'包名[：:]\s*([\w.]+)', content)
+        if package_match:
+            package_name = package_match.group(1).strip()
+            meta["package_name"] = package_name
+            meta["package_path"] = package_name.replace(".", "/") + "/"
+        
+        # 提取技术栈
+        if "Spring Boot" in content or "Java" in content:
+            meta["backend_language"] = "java"
+        if "Vue" in content:
+            meta["frontend_framework"] = "vue"
+        if "React" in content:
+            meta["frontend_framework"] = "react"
+        
+        return meta if meta else None
+    
+    def _extract_meta_from_architecture(self, content: str) -> Optional[dict]:
+        """从架构设计文档提取项目元信息"""
+        import re
+        
+        meta = {}
+        
+        # 提取包名（Java 项目常见格式：com.example.xxx）
+        package_match = re.search(r'package\s+([\w.]+)', content)
+        if package_match:
+            package_name = package_match.group(1).strip()
+            meta["package_name"] = package_name
+            meta["package_path"] = package_name.replace(".", "/") + "/"
+        
+        # 从目录结构提取
+        # 例如：com.example.device/
+        dir_match = re.search(r'([\w.]+)/\s*\n', content)
+        if dir_match:
+            potential_package = dir_match.group(1)
+            if "." in potential_package and potential_package.count(".") >= 2:
+                meta["package_name"] = potential_package
+                meta["package_path"] = potential_package.replace(".", "/") + "/"
+        
+        return meta if meta else None
+    
+    def _generate_default_meta(self) -> dict:
+        """生成默认的项目元信息"""
+        # 从项目名称生成包名
+        # 例如：device-management -> com.example.device
+        project_name = self.project_name
+        
+        # 转换项目名称为包名格式
+        # 去掉版本号后缀
+        name = re.sub(r'-v?\d+.*$', '', project_name)
+        # 转换为小写，去掉连字符
+        words = name.replace("-", " ").replace("_", " ").split()
+        if len(words) >= 1:
+            # 如果是单个词，使用 com.example.{word}
+            package_name = f"com.example.{words[0]}"
+        else:
+            package_name = f"com.example.{name.replace('-', '').replace('_', '')}"
+        
+        return {
+            "project_name": project_name,
+            "package_name": package_name,
+            "package_path": package_name.replace(".", "/") + "/",
+            "backend_language": "java",
+            "frontend_framework": "vue"
+        }
 
     # ==================== 阶段管理 ====================
 
@@ -326,6 +448,10 @@ class WorkflowExecutor:
         if stage == "development" and not self.modules:
             self.modules = self._load_modules()
         
+        # 加载项目元信息（用于动态路径替换）
+        if not hasattr(self, 'project_meta') or not self.project_meta:
+            self.project_meta = self._load_project_meta()
+        
         # 获取正确的输出路径
         output_path = self.project_dir / (stage_config.output_dir or f"output/{stage}")
         
@@ -333,7 +459,8 @@ class WorkflowExecutor:
             stage, output_path, self.base_dir,  # 使用正确的输出路径
             project_type=self.project_type,
             subtask_strategy=self.subtask_strategy,
-            modules=self.modules
+            modules=self.modules,
+            project_meta=self.project_meta
         )
         
         if subtask_executor.has_subtasks() and self.execute:

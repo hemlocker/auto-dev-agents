@@ -264,6 +264,7 @@ class SubtaskExecutor:
                  project_type: str = "fullstack",
                  subtask_strategy: str = "layer",
                  modules: List[dict] = None,
+                 project_meta: dict = None,
                  custom_subtasks: dict = None):
         self.stage = stage
         self.output_dir = output_dir
@@ -271,6 +272,7 @@ class SubtaskExecutor:
         self.project_type = project_type
         self.subtask_strategy = subtask_strategy
         self.modules = modules or []
+        self.project_meta = project_meta or {}
         
         # 根据策略获取子任务定义
         if stage == "development" and subtask_strategy in ["module", "auto"]:
@@ -334,6 +336,9 @@ class SubtaskExecutor:
         """生成子任务提示词（包含增量输出和边界限制）"""
         base_prompt = self._load_stage_prompt()
         
+        # 动态变量替换
+        subtask = self._replace_variables(subtask)
+        
         # 构建上下文信息：包含已完成的子任务输出
         context_info = ""
         if subtask.get("depends_on"):
@@ -390,13 +395,22 @@ class SubtaskExecutor:
         # 计算实际的输出根目录
         output_root = self.output_dir
         if subtask.get("output_dirs"):
-            # 多个目录时，输出根目录是项目的 src/ 目录
-            output_root = self.output_dir.parent / "src"
+            # 多个目录时，输出根目录是项目根目录
+            output_root = self.output_dir.parent.parent  # 从 output/src 回到项目根
+        
+        # 添加项目元信息
+        meta_info = ""
+        if self.project_meta:
+            meta_info = f"\n## 项目信息\n"
+            if self.project_meta.get("package_name"):
+                meta_info += f"- 包名: {self.project_meta['package_name']}\n"
+            if self.project_meta.get("project_name"):
+                meta_info += f"- 项目名称: {self.project_meta['project_name']}\n"
         
         return f"""# 子任务: {subtask['name']}
 
 ## 阶段: {self.stage}
-
+{meta_info}
 ## 系统提示词
 {base_prompt[:2000]}
 
@@ -415,6 +429,41 @@ class SubtaskExecutor:
 4. **完成标记**: 输出完成后添加 [SUBTASK_COMPLETE: {subtask['name']}]
 5. **问题标记**: 如有问题添加 [SUBTASK_QUESTION: 问题描述]
 """
+    
+    def _replace_variables(self, subtask: dict) -> dict:
+        """替换子任务中的动态变量
+        
+        支持的变量：
+        - {package_path}: 包名路径，如 com/example/device/
+        - {package_name}: 包名，如 com.example.device
+        - {project_name}: 项目名称
+        """
+        import copy
+        subtask = copy.deepcopy(subtask)
+        
+        # 获取变量值
+        package_path = self.project_meta.get("package_path", "com/example/app/")
+        package_name = self.project_meta.get("package_name", "com.example.app")
+        project_name = self.project_meta.get("project_name", "my-project")
+        
+        # 替换函数
+        def replace(s):
+            if isinstance(s, str):
+                return s.replace("{package_path}", package_path) \
+                        .replace("{package_name}", package_name) \
+                        .replace("{project_name}", project_name)
+            return s
+        
+        # 替换所有字符串字段
+        for key in ["output_dir", "description"]:
+            if subtask.get(key):
+                subtask[key] = replace(subtask[key])
+        
+        # 替换 output_dirs 列表
+        if subtask.get("output_dirs"):
+            subtask["output_dirs"] = [replace(d) for d in subtask["output_dirs"]]
+        
+        return subtask
     
     def _load_stage_prompt(self) -> str:
         """加载阶段提示词"""

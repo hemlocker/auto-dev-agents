@@ -145,7 +145,12 @@ STAGE_SUBTASKS = {
             "name": "models",
             "description": "创建数据模型（entity、dto、vo、enums）",
             "depends_on": ["project_structure"],
-            "output_dirs": ["src/entity/", "src/dto/", "src/vo/", "src/enums/"],
+            "output_dirs": [
+                "backend/src/main/java/{package_path}entity/",
+                "backend/src/main/java/{package_path}dto/",
+                "backend/src/main/java/{package_path}vo/",
+                "backend/src/main/java/{package_path}enums/"
+            ],
             "excludes": ["repository", "repositories", "service", "services", "controller", "controllers"],
             "max_tokens_estimate": 8000
         },
@@ -153,7 +158,7 @@ STAGE_SUBTASKS = {
             "name": "repositories",
             "description": "创建数据访问层（Repository 接口）",
             "depends_on": ["models"],
-            "output_dir": "src/repository/",
+            "output_dir": "backend/src/main/java/{package_path}repository/",
             "excludes": ["service", "services", "controller", "controllers"],
             "max_tokens_estimate": 6000
         },
@@ -161,29 +166,48 @@ STAGE_SUBTASKS = {
             "name": "services",
             "description": "创建业务逻辑层（Service 接口和实现）",
             "depends_on": ["repositories"],
-            "output_dir": "src/service/",
+            "output_dir": "backend/src/main/java/{package_path}service/",
             "excludes": ["controller", "controllers"],
             "max_tokens_estimate": 10000
         },
         {
             "name": "controllers",
-            "description": "创建控制器层（Controller 接口）",
+            "description": "创建控制器层（Controller）",
             "depends_on": ["services"],
-            "output_dir": "src/controller/",
+            "output_dir": "backend/src/main/java/{package_path}controller/",
             "max_tokens_estimate": 8000
+        },
+        {
+            "name": "common",
+            "description": "创建公共模块（config、exception、response、util）",
+            "depends_on": ["controllers"],
+            "output_dirs": [
+                "backend/src/main/java/{package_path}config/",
+                "backend/src/main/java/{package_path}exception/",
+                "backend/src/main/java/{package_path}response/",
+                "backend/src/main/java/{package_path}util/"
+            ],
+            "max_tokens_estimate": 6000
+        },
+        {
+            "name": "frontend_api",
+            "description": "创建前端 API 客户端",
+            "depends_on": ["controllers"],
+            "output_dir": "frontend/src/api/",
+            "max_tokens_estimate": 5000
         },
         {
             "name": "frontend_components",
             "description": "创建前端组件",
-            "depends_on": ["controllers"],
-            "output_dir": "src/frontend/components/",
-            "max_tokens_estimate": 10000
+            "depends_on": ["frontend_api"],
+            "output_dir": "frontend/src/components/",
+            "max_tokens_estimate": 8000
         },
         {
-            "name": "frontend_pages",
+            "name": "frontend_views",
             "description": "创建前端页面",
             "depends_on": ["frontend_components"],
-            "output_dir": "src/frontend/pages/",
+            "output_dir": "frontend/src/views/",
             "max_tokens_estimate": 10000
         }
     ],
