@@ -97,6 +97,17 @@ execution:
   # 超时（秒）
   timeout_seconds: 1800  # 30 分钟
   
+  # 子任务执行配置
+  subtask:
+    # 启用子任务拆分执行
+    enabled: true
+    
+    # 子任务间延迟（秒）
+    delay_seconds: 5
+    
+    # 失败时是否继续执行其他子任务
+    continue_on_failure: true
+  
   # 上下文限制配置
   # 模型限制: contextWindow=202752, maxTokens=16384
   context:

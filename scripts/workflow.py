@@ -75,6 +75,264 @@ if not GATEWAY_TOKEN:
     GATEWAY_TOKEN = _load_gateway_token()
 
 
+# ==================== 子任务定义 ====================
+
+# 阶段子任务拆分模板
+STAGE_SUBTASKS = {
+    "requirement": [
+        {
+            "name": "analyze_input",
+            "description": "分析输入文件，提取需求点",
+            "output_files": ["需求点清单.md"],
+            "max_tokens_estimate": 5000
+        },
+        {
+            "name": "user_requirements",
+            "description": "生成用户需求文档",
+            "depends_on": ["analyze_input"],
+            "output_files": ["user_requirements.md"],
+            "max_tokens_estimate": 8000
+        },
+        {
+            "name": "software_requirements",
+            "description": "生成软件需求规格",
+            "depends_on": ["user_requirements"],
+            "output_files": ["software_requirements.md"],
+            "max_tokens_estimate": 10000
+        },
+        {
+            "name": "rtm",
+            "description": "生成需求追踪矩阵",
+            "depends_on": ["software_requirements"],
+            "output_files": ["rtm.json"],
+            "max_tokens_estimate": 3000
+        }
+    ],
+    
+    "design": [
+        {
+            "name": "architecture",
+            "description": "系统架构设计",
+            "output_files": ["architecture_design.md"],
+            "max_tokens_estimate": 8000
+        },
+        {
+            "name": "data_model",
+            "description": "数据模型设计",
+            "depends_on": ["architecture"],
+            "output_files": ["data_model.md"],
+            "max_tokens_estimate": 6000
+        },
+        {
+            "name": "api_design",
+            "description": "API 接口设计",
+            "depends_on": ["data_model"],
+            "output_files": ["api_spec.md"],
+            "max_tokens_estimate": 8000
+        },
+        {
+            "name": "detailed_design",
+            "description": "详细设计文档",
+            "depends_on": ["api_design"],
+            "output_files": ["detailed_design.md"],
+            "max_tokens_estimate": 12000
+        }
+    ],
+    
+    "development": [
+        {
+            "name": "project_structure",
+            "description": "创建项目结构和配置文件",
+            "output_files": ["package.json", "requirements.txt", "*.config.*"],
+            "max_tokens_estimate": 3000
+        },
+        {
+            "name": "models",
+            "description": "创建数据模型",
+            "depends_on": ["project_structure"],
+            "output_dir": "src/models/",
+            "max_tokens_estimate": 8000
+        },
+        {
+            "name": "repositories",
+            "description": "创建数据访问层",
+            "depends_on": ["models"],
+            "output_dir": "src/repositories/",
+            "max_tokens_estimate": 6000
+        },
+        {
+            "name": "services",
+            "description": "创建业务逻辑层",
+            "depends_on": ["repositories"],
+            "output_dir": "src/services/",
+            "max_tokens_estimate": 10000
+        },
+        {
+            "name": "controllers",
+            "description": "创建控制器层",
+            "depends_on": ["services"],
+            "output_dir": "src/controllers/",
+            "max_tokens_estimate": 8000
+        },
+        {
+            "name": "frontend_components",
+            "description": "创建前端组件",
+            "depends_on": ["controllers"],
+            "output_dir": "src/frontend/components/",
+            "max_tokens_estimate": 10000
+        },
+        {
+            "name": "frontend_pages",
+            "description": "创建前端页面",
+            "depends_on": ["frontend_components"],
+            "output_dir": "src/frontend/pages/",
+            "max_tokens_estimate": 10000
+        }
+    ],
+    
+    "testing": [
+        {
+            "name": "unit_tests",
+            "description": "编写单元测试",
+            "output_dir": "tests/unit/",
+            "max_tokens_estimate": 10000
+        },
+        {
+            "name": "integration_tests",
+            "description": "编写集成测试",
+            "depends_on": ["unit_tests"],
+            "output_dir": "tests/integration/",
+            "max_tokens_estimate": 8000
+        },
+        {
+            "name": "test_report",
+            "description": "生成测试报告",
+            "depends_on": ["integration_tests"],
+            "output_files": ["测试报告.md"],
+            "max_tokens_estimate": 3000
+        }
+    ],
+    
+    "deployment": [
+        {
+            "name": "docker_config",
+            "description": "创建 Docker 配置",
+            "output_files": ["Dockerfile", "docker-compose.yml"],
+            "max_tokens_estimate": 5000
+        },
+        {
+            "name": "nginx_config",
+            "description": "创建 Nginx 配置",
+            "output_files": ["nginx.conf"],
+            "max_tokens_estimate": 3000
+        },
+        {
+            "name": "deploy_scripts",
+            "description": "创建部署脚本",
+            "depends_on": ["docker_config", "nginx_config"],
+            "output_files": ["deploy.sh", "rollback.sh"],
+            "max_tokens_estimate": 5000
+        },
+        {
+            "name": "deploy_report",
+            "description": "生成部署文档",
+            "output_files": ["部署报告.md"],
+            "max_tokens_estimate": 3000
+        }
+    ]
+}
+
+
+class SubtaskExecutor:
+    """子任务执行器 - 处理任务拆分和增量执行"""
+    
+    def __init__(self, stage: str, output_dir: Path, base_dir: Path):
+        self.stage = stage
+        self.output_dir = output_dir
+        self.base_dir = base_dir
+        self.subtasks = STAGE_SUBTASKS.get(stage, [])
+        self.completed = set()
+        self.results = {}
+    
+    def get_execution_plan(self) -> List[dict]:
+        """获取执行计划（拓扑排序）"""
+        if not self.subtasks:
+            return []
+        
+        # 简单拓扑排序
+        ordered = []
+        remaining = list(self.subtasks)
+        
+        while remaining:
+            for subtask in remaining[:]:
+                deps = subtask.get("depends_on", [])
+                if all(d in self.completed for d in deps):
+                    ordered.append(subtask)
+                    remaining.remove(subtask)
+                    self.completed.add(subtask["name"])
+        
+        return ordered
+    
+    def generate_subtask_prompt(self, subtask: dict, context: dict) -> str:
+        """生成子任务提示词"""
+        base_prompt = self._load_stage_prompt()
+        
+        # 构建上下文信息
+        context_info = ""
+        if subtask.get("depends_on"):
+            context_info += "\n## 已完成的子任务\n"
+            for dep in subtask["depends_on"]:
+                if dep in self.results:
+                    context_info += f"- {dep}: {self.results[dep].get('summary', '已完成')}\n"
+        
+        # 输出限制
+        output_limit = ""
+        if subtask.get("output_files"):
+            output_limit = f"\n## 输出文件\n本次只需输出: {', '.join(subtask['output_files'])}"
+        elif subtask.get("output_dir"):
+            output_limit = f"\n## 输出目录\n本次只需输出到: {subtask['output_dir']}"
+        
+        return f"""# 子任务: {subtask['name']}
+
+## 阶段: {self.stage}
+
+## 任务描述
+{subtask['description']}
+
+{context_info}
+{output_limit}
+
+## 输出目录
+{self.output_dir}
+
+## 注意事项
+1. 只输出本次子任务的内容，不要输出其他文件
+2. 输出完成后在末尾添加: [SUBTASK_COMPLETE: {subtask['name']}]
+3. 如遇到问题，添加: [SUBTASK_QUESTION: 问题描述]
+"""
+    
+    def _load_stage_prompt(self) -> str:
+        """加载阶段提示词"""
+        prompt_path = self.base_dir / "prompts" / self.stage / "system.md"
+        if prompt_path.exists():
+            return prompt_path.read_text(encoding="utf-8")
+        return f"你是 {self.stage} 智能体，请完成你的任务。"
+    
+    def record_result(self, subtask_name: str, result: dict):
+        """记录子任务结果"""
+        self.results[subtask_name] = result
+        self.completed.add(subtask_name)
+    
+    def get_summary(self) -> dict:
+        """获取执行摘要"""
+        return {
+            "stage": self.stage,
+            "total_subtasks": len(self.subtasks),
+            "completed_subtasks": len(self.completed),
+            "results": self.results
+        }
+
+
 # ==================== 输入分析器 ====================
 
 class InputAnalyzer:
@@ -707,6 +965,14 @@ class WorkflowExecutor:
             if not passed:
                 raise DependencyError(stage, missing)
         
+        # 检查是否有子任务定义
+        subtasks = STAGE_SUBTASKS.get(stage, [])
+        output_path = self.project_dir / (stage_config.output_dir or f"output/{stage}")
+        
+        if subtasks and self.execute:
+            # 有子任务定义，使用增量执行
+            return self._execute_stage_subtasks(stage, phase, subtasks, output_path, wait)
+        
         # 分析输入，决定是否分批
         input_path = self.project_dir / (stage_config.input_dir or "input/")
         if self.execute:
@@ -719,6 +985,175 @@ class WorkflowExecutor:
         
         # 直接执行（单批次）
         return self._execute_stage_single(stage, phase, wait)
+    
+    def _execute_stage_subtasks(self, stage: str, phase: str, subtasks: List[dict],
+                                  output_dir: Path, wait: bool = True) -> dict:
+        """使用子任务增量执行阶段
+        
+        Args:
+            stage: 阶段名称
+            phase: PDCA 阶段
+            subtasks: 子任务列表
+            output_dir: 输出目录
+            wait: 是否等待每批完成
+            
+        Returns:
+            dict: 执行结果
+        """
+        print(f"\n{'='*60}")
+        print(f"📦 阶段 {stage} 使用子任务增量执行")
+        print(f"   子任务数: {len(subtasks)}")
+        print(f"{'='*60}")
+        
+        # 创建子任务执行器
+        executor = SubtaskExecutor(stage, output_dir, self.base_dir)
+        execution_plan = executor.get_execution_plan()
+        
+        start_time = time.time()
+        subtask_results = []
+        
+        for i, subtask in enumerate(execution_plan):
+            subtask_name = subtask["name"]
+            print(f"\n{'─'*40}")
+            print(f"[{i+1}/{len(execution_plan)}] 子任务: {subtask_name}")
+            print(f"   描述: {subtask['description']}")
+            
+            try:
+                # 生成子任务提示词
+                task_prompt = executor.generate_subtask_prompt(
+                    subtask, 
+                    {"output_dir": output_dir}
+                )
+                
+                # 执行子任务
+                result = self._execute_subtask(
+                    stage, phase, subtask_name, task_prompt, output_dir, wait
+                )
+                
+                # 检查子任务完成状态
+                if result.get("success"):
+                    print(f"   ✅ 子任务完成")
+                    executor.record_result(subtask_name, {
+                        "success": True,
+                        "output": result.get("output", ""),
+                        "summary": subtask["description"]
+                    })
+                else:
+                    print(f"   ⚠️ 子任务可能不完整")
+                    executor.record_result(subtask_name, {
+                        "success": result.get("success", False),
+                        "output": result.get("output", ""),
+                        "summary": subtask["description"]
+                    })
+                
+                subtask_results.append({
+                    "subtask": subtask_name,
+                    "success": result.get("success", False),
+                    "duration": result.get("duration", 0)
+                })
+                
+                # 子任务间短暂延迟
+                if i < len(execution_plan) - 1:
+                    delay = 5  # 子任务间延迟 5 秒
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                print(f"   ❌ 子任务失败: {e}")
+                subtask_results.append({
+                    "subtask": subtask_name,
+                    "success": False,
+                    "error": str(e)
+                })
+                # 继续执行其他子任务
+                continue
+        
+        # 汇总结果
+        total_duration = time.time() - start_time
+        success_count = sum(1 for r in subtask_results if r.get("success"))
+        
+        print(f"\n{'='*60}")
+        print(f"📊 阶段 {stage} 子任务执行完成")
+        print(f"   成功: {success_count}/{len(subtasks)}")
+        print(f"   耗时: {total_duration:.1f}s")
+        print(f"{'='*60}")
+        
+        return {
+            "stage": stage,
+            "phase": phase,
+            "subtask_mode": True,
+            "total_subtasks": len(subtasks),
+            "success_subtasks": success_count,
+            "failed_subtasks": len(subtasks) - success_count,
+            "duration": total_duration,
+            "success": success_count == len(subtasks),
+            "subtask_results": subtask_results,
+            "summary": executor.get_summary()
+        }
+    
+    def _execute_subtask(self, stage: str, phase: str, subtask_name: str, 
+                          task_prompt: str, output_dir: Path, wait: bool = True) -> dict:
+        """执行单个子任务"""
+        stage_config = self.stage_map.get(stage) or StageConfig(stage, phase or "custom")
+        timeout = stage_config.timeout if stage_config.timeout else 1800
+        
+        label = f"{self.project_name}_{phase}_{stage}_{subtask_name}"
+        
+        spawn_config = {
+            "action": "sessions_spawn",
+            "params": {
+                "runtime": "subagent",
+                "mode": "run",
+                "task": task_prompt,
+                "cwd": str(self.base_dir),
+                "timeoutSeconds": timeout,
+                "label": label
+            },
+            "stage": stage,
+            "phase": phase,
+            "subtask": subtask_name
+        }
+        
+        start_time = time.time()
+        
+        if self.execute and self.subagent_executor:
+            result = self.subagent_executor.spawn(
+                task=task_prompt,
+                cwd=str(self.base_dir),
+                label=label,
+                timeout_seconds=timeout
+            )
+            
+            if not result.get("ok"):
+                error_msg = result.get("error", "未知错误")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "duration": time.time() - start_time
+                }
+            
+            spawn_config["spawn_result"] = result
+            
+            if wait:
+                result_data = result.get("result", {})
+                if "details" in result_data:
+                    session_key = result_data["details"].get("childSessionKey")
+                else:
+                    session_key = result_data.get("childSessionKey")
+                    
+                if session_key:
+                    completed = self._wait_for_completion(session_key)
+                    if not completed:
+                        return {
+                            "success": False,
+                            "error": "超时",
+                            "duration": time.time() - start_time
+                        }
+        
+        return {
+            "success": True,
+            "duration": time.time() - start_time,
+            "output_dir": str(output_dir)
+        }
     
     def _execute_stage_single(self, stage: str, phase: str, wait: bool = True,
                                batch_info: dict = None) -> dict:
