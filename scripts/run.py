@@ -37,7 +37,7 @@ from typing import Optional, Dict, List, Tuple
 
 # 导入拆分的模块
 from workflow.models import StageConfig, STAGE_SUBTASKS, WorkflowError, StageExecutionError, StageTimeoutError, DependencyError
-from workflow.executors import InputAnalyzer, SubtaskExecutor, SubagentExecutor
+from workflow.executors import InputAnalyzer, SubtaskExecutor, SubagentExecutor, http_post
 from workflow.state import WorkflowState
 
 
@@ -326,13 +326,15 @@ class WorkflowExecutor:
         if stage == "development" and not self.modules:
             self.modules = self._load_modules()
         
+        # 获取正确的输出路径
+        output_path = self.project_dir / (stage_config.output_dir or f"output/{stage}")
+        
         subtask_executor = SubtaskExecutor(
-            stage, self.output_dir / stage, self.base_dir, 
+            stage, output_path, self.base_dir,  # 使用正确的输出路径
             project_type=self.project_type,
             subtask_strategy=self.subtask_strategy,
             modules=self.modules
         )
-        output_path = self.project_dir / (stage_config.output_dir or f"output/{stage}")
         
         if subtask_executor.has_subtasks() and self.execute:
             return self._execute_stage_subtasks(stage, phase, subtask_executor, output_path, wait)
@@ -465,19 +467,70 @@ class WorkflowExecutor:
             }
         }
     
+    def _wait_for_no_active_subagents(self, max_wait: int = 300) -> bool:
+        """等待所有活跃子智能体完成
+        
+        Returns:
+            bool: True 表示无活跃子智能体，False 表示超时
+        """
+        if not self.subagent_executor:
+            return True
+        
+        waited = 0
+        poll_interval = 5
+        
+        while waited < max_wait:
+            status = self.subagent_executor.check_status("__list_all__")
+            active_count = 0
+            
+            # check_status 返回的是单个 session 的状态
+            # 我们需要通过 subagents list 获取所有活跃的
+            headers = {"Content-Type": "application/json"}
+            if self.subagent_executor.gateway_token:
+                headers["Authorization"] = f"Bearer {self.subagent_executor.gateway_token}"
+            
+            payload = {"tool": "subagents", "args": {"action": "list"}}
+            result = http_post(
+                f"{self.subagent_executor.gateway_url}/tools/invoke",
+                headers, payload, timeout=10
+            )
+            
+            if result.get("status_code") == 200:
+                data = result.get("json", {})
+                if data.get("ok"):
+                    details = data.get("result", {}).get("details", {})
+                    if not details:
+                        details = data.get("result", {})
+                    active = details.get("active", [])
+                    active_count = len(active)
+                    
+                    if active_count == 0:
+                        return True
+                    
+                    if waited % 30 == 0:  # 每30秒打印一次
+                        print(f"  ⚠️ 等待 {active_count} 个活跃子智能体完成...")
+            
+            time.sleep(poll_interval)
+            waited += poll_interval
+        
+        print(f"  ⏰ 等待活跃子智能体超时 ({max_wait}s)")
+        return False
+    
     def _execute_stage_subtasks(self, stage: str, phase: str, 
                                   subtask_executor: SubtaskExecutor,
                                   output_dir: Path, wait: bool = True) -> dict:
-        """使用子任务增量执行阶段"""
+        """使用子任务增量执行阶段（严格串行）"""
         execution_plan = subtask_executor.get_execution_plan()
         
         print(f"\n{'='*60}")
         print(f"📦 阶段 {stage} 使用子任务增量执行")
         print(f"   子任务数: {len(execution_plan)}")
+        print(f"   执行模式: 严格串行（一次只运行一个子任务）")
         print(f"{'='*60}")
         
         start_time = time.time()
         subtask_results = []
+        current_session_key = None  # 追踪当前子任务的 session
         
         for i, subtask in enumerate(execution_plan):
             subtask_name = subtask["name"]
@@ -485,14 +538,22 @@ class WorkflowExecutor:
             print(f"[{i+1}/{len(execution_plan)}] 子任务: {subtask_name}")
             print(f"   描述: {subtask['description']}")
             
+            # 🔒 在执行新子任务前，确保没有活跃的子智能体
+            if self.execute and self.subagent_executor:
+                print(f"   🔒 检查活跃子智能体...")
+                if not self._wait_for_no_active_subagents(max_wait=60):
+                    print(f"   ⚠️ 存在活跃子智能体，强制等待...")
+                    self._wait_for_no_active_subagents(max_wait=300)
+            
             try:
                 task_prompt = subtask_executor.generate_subtask_prompt(
                     subtask, {"output_dir": output_dir}
                 )
                 
-                result = self._execute_subtask(
+                result, session_key = self._execute_subtask_with_session(
                     stage, phase, subtask_name, task_prompt, output_dir, wait
                 )
+                current_session_key = session_key
                 
                 if result.get("success"):
                     new_files = result.get("output_files", [])
@@ -503,6 +564,9 @@ class WorkflowExecutor:
                         "output_dir": result.get("output_dir"),
                         "summary": subtask["description"]
                     })
+                    
+                    # ✅ 立即更新状态
+                    self.state.update_stage(phase, f"{stage}:{subtask_name}")
                 else:
                     print(f"   ⚠️ 子任务可能不完整: {result.get('error', '未知')}")
                     subtask_executor.record_result(subtask_name, {
@@ -514,11 +578,15 @@ class WorkflowExecutor:
                 subtask_results.append({
                     "subtask": subtask_name,
                     "success": result.get("success", False),
-                    "duration": result.get("duration", 0)
+                    "duration": result.get("duration", 0),
+                    "session_key": session_key
                 })
                 
+                # 子任务间增加间隔，确保资源释放
                 if i < len(execution_plan) - 1:
-                    time.sleep(5)
+                    delay = 10
+                    print(f"   ⏳ 等待 {delay}s 后执行下一个子任务...")
+                    time.sleep(delay)
                     
             except Exception as e:
                 print(f"   ❌ 子任务失败: {e}")
@@ -538,6 +606,10 @@ class WorkflowExecutor:
         print(f"   耗时: {total_duration:.1f}s")
         print(f"{'='*60}")
         
+        # ✅ 阶段完成后更新状态
+        if success_count == len(execution_plan):
+            self.state.update_stage(phase, stage)
+        
         return {
             "stage": stage,
             "phase": phase,
@@ -551,9 +623,13 @@ class WorkflowExecutor:
             "summary": subtask_executor.get_summary()
         }
     
-    def _execute_subtask(self, stage: str, phase: str, subtask_name: str, 
-                          task_prompt: str, output_dir: Path, wait: bool = True) -> dict:
-        """执行单个子任务"""
+    def _execute_subtask_with_session(self, stage: str, phase: str, subtask_name: str,
+                                       task_prompt: str, output_dir: Path, wait: bool = True) -> Tuple[dict, Optional[str]]:
+        """执行单个子任务并返回 session_key
+        
+        Returns:
+            Tuple[dict, Optional[str]]: (结果字典, session_key)
+        """
         stage_config = self.stage_map.get(stage) or StageConfig(stage, phase or "custom")
         timeout = stage_config.timeout if stage_config.timeout else 1800
         
@@ -564,8 +640,11 @@ class WorkflowExecutor:
             existing_files = {str(f) for f in output_dir.rglob("*") if f.is_file()}
         
         start_time = time.time()
+        session_key = None
         
         if self.execute and self.subagent_executor:
+            print(f"   🚀 启动子智能体: {label}")
+            
             result = self.subagent_executor.spawn(
                 task=task_prompt,
                 cwd=str(self.base_dir),
@@ -578,23 +657,24 @@ class WorkflowExecutor:
                     "success": False,
                     "error": result.get("error", "未知错误"),
                     "duration": time.time() - start_time
-                }
+                }, None
             
-            if wait:
-                result_data = result.get("result", {})
-                if "details" in result_data:
-                    session_key = result_data["details"].get("childSessionKey")
-                else:
-                    session_key = result_data.get("childSessionKey")
-                    
-                if session_key:
-                    completed = self._wait_for_completion(session_key)
-                    if not completed:
-                        return {
-                            "success": False,
-                            "error": "超时",
-                            "duration": time.time() - start_time
-                        }
+            # 提取 session_key
+            result_data = result.get("result", {})
+            if "details" in result_data:
+                session_key = result_data["details"].get("childSessionKey")
+            else:
+                session_key = result_data.get("childSessionKey")
+            
+            if wait and session_key:
+                print(f"   ⏳ 等待子智能体完成: {session_key[:50]}...")
+                completed = self._wait_for_completion(session_key)
+                if not completed:
+                    return {
+                        "success": False,
+                        "error": "超时",
+                        "duration": time.time() - start_time
+                    }, session_key
         
         new_files = []
         if output_dir.exists():
@@ -607,7 +687,13 @@ class WorkflowExecutor:
             "output_dir": str(output_dir),
             "output_files": new_files,
             "total_files": len(new_files)
-        }
+        }, session_key
+    
+    def _execute_subtask(self, stage: str, phase: str, subtask_name: str, 
+                          task_prompt: str, output_dir: Path, wait: bool = True) -> dict:
+        """执行单个子任务（兼容旧接口）"""
+        result, _ = self._execute_subtask_with_session(stage, phase, subtask_name, task_prompt, output_dir, wait)
+        return result
     
     def _wait_for_completion(self, session_key: str, poll_interval: int = 10, max_wait: int = 3600):
         """等待子智能体完成"""

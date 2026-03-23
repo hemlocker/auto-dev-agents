@@ -311,6 +311,25 @@ class SubtaskExecutor:
         
         return ordered
     
+    # 子任务输出排除规则（防止越界输出）
+    SUBTASK_EXCLUSIONS = {
+        "models": {
+            "exclude_dirs": ["repository", "repositories", "service", "services", "controller", "controllers"],
+            "exclude_files": ["*Repository*.java", "*Service*.java", "*Controller*.java"],
+            "message": "⚠️ 只输出数据模型相关代码（entity/dto/vo/enums），不要输出 repository/service/controller"
+        },
+        "repositories": {
+            "exclude_dirs": ["service", "services", "controller", "controllers"],
+            "exclude_files": ["*Service*.java", "*Controller*.java"],
+            "message": "⚠️ 只输出数据访问层代码（Repository 接口和实现），不要输出 service/controller"
+        },
+        "services": {
+            "exclude_dirs": ["controller", "controllers"],
+            "exclude_files": ["*Controller*.java"],
+            "message": "⚠️ 只输出业务逻辑层代码（Service 接口和实现），不要输出 controller"
+        }
+    }
+    
     def generate_subtask_prompt(self, subtask: dict, context: dict) -> str:
         """生成子任务提示词（包含增量输出）"""
         base_prompt = self._load_stage_prompt()
@@ -339,6 +358,17 @@ class SubtaskExecutor:
         elif subtask.get("output_dir"):
             output_limit = f"\n## 本次输出目录\n只需输出到: {subtask['output_dir']}"
         
+        # 添加排除规则
+        exclusion_info = ""
+        subtask_name = subtask.get("name", "")
+        if subtask_name in self.SUBTASK_EXCLUSIONS:
+            rules = self.SUBTASK_EXCLUSIONS[subtask_name]
+            exclusion_info = f"\n## ⚠️ 输出边界限制\n{rules['message']}\n"
+            if rules.get("exclude_dirs"):
+                exclusion_info += f"- 不要创建以下目录: {', '.join(rules['exclude_dirs'])}\n"
+            if rules.get("exclude_files"):
+                exclusion_info += f"- 不要输出以下类型文件: {', '.join(rules['exclude_files'])}\n"
+        
         return f"""# 子任务: {subtask['name']}
 
 ## 阶段: {self.stage}
@@ -350,15 +380,16 @@ class SubtaskExecutor:
 {subtask['description']}
 {context_info}
 {output_limit}
-
+{exclusion_info}
 ## 输出目录
 {self.output_dir}
 
 ## 增量执行要求
 1. **读取前置输出**: 先读取依赖子任务生成的文件
 2. **只输出本次内容**: 不要重复输出已有文件
-3. **完成标记**: 输出完成后添加 [SUBTASK_COMPLETE: {subtask['name']}]
-4. **问题标记**: 如有问题添加 [SUBTASK_QUESTION: 问题描述]
+3. **严格遵守边界**: 只输出本子任务负责的内容，不要越界输出其他层的代码
+4. **完成标记**: 输出完成后添加 [SUBTASK_COMPLETE: {subtask['name']}]
+5. **问题标记**: 如有问题添加 [SUBTASK_QUESTION: 问题描述]
 """
     
     def _load_stage_prompt(self) -> str:
