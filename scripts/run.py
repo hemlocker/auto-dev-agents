@@ -937,12 +937,44 @@ class WorkflowExecutor:
             print(f"执行失败: {e}")
             return None
 
-    def execute_stages(self, stages: List[str]) -> List[dict]:
-        """执行指定阶段列表"""
+    def execute_stages(self, stages: List[str], incremental: bool = True) -> List[dict]:
+        """执行指定阶段列表（支持增量更新）
+        
+        Args:
+            stages: 要执行的阶段列表
+            incremental: 是否启用增量更新（默认启用）
+        
+        Returns:
+            执行结果列表
+        """
         results = []
         stage_names = [s.name for s in self.stages]
         
-        print(f"\n🚀 执行指定阶段: {', '.join(stages)}")
+        # 增量检测
+        if incremental:
+            plan = self.dist_state.get_incremental_plan(stages)
+            
+            if plan["mode"] == "none":
+                print(f"\n✅ 输入无变化，跳过执行")
+                return []
+            
+            if plan["mode"] == "incremental":
+                print(f"\n🔄 增量执行模式")
+                print(f"   原因: {plan['reason']}")
+                print(f"   受影响阶段: {', '.join(plan['stages_to_run'])}")
+                
+                if plan["changes"].get("stats"):
+                    stats = plan["changes"]["stats"]
+                    print(f"   变化统计: 新增 {stats['new']}, 修改 {stats['modified']}, 删除 {stats['deleted']}")
+                
+                stages = plan["stages_to_run"]
+                if not stages:
+                    print(f"\n✅ 指定阶段不受影响，跳过执行")
+                    return []
+            else:
+                print(f"\n🚀 全量执行模式: {plan['reason']}")
+        else:
+            print(f"\n🚀 执行指定阶段: {', '.join(stages)}")
 
         for stage in stages:
             if stage not in stage_names:
@@ -1150,6 +1182,12 @@ def main():
     parser.add_argument("--reset", action="store_true", help="重置状态")
     parser.add_argument("--execute", "-e", action="store_true", help="实际执行子智能体")
     parser.add_argument("--gateway-url", default="http://127.0.0.1:18799", help="Gateway URL")
+    parser.add_argument("--incremental", "-i", action="store_true", default=True, 
+                        help="启用增量更新（默认启用）")
+    parser.add_argument("--full", action="store_true", 
+                        help="强制全量执行（忽略增量检测）")
+    parser.add_argument("--reset-incremental", action="store_true", 
+                        help="重置增量状态")
 
     args = parser.parse_args()
 
@@ -1204,8 +1242,13 @@ def main():
         executor.state.reset()
         print("已重置")
 
+    elif args.reset_incremental:
+        executor.dist_state.reset_incremental_state()
+
     elif args.stages or args.from_stage or args.until_stage:
-        results = executor.execute_stages(stages_override)
+        # 确定是否使用增量模式
+        use_incremental = args.incremental and not args.full
+        results = executor.execute_stages(stages_override, incremental=use_incremental)
         if not args.execute:
             print(f"\n📋 执行结果（使用 --execute 实际执行）:")
             for r in results:

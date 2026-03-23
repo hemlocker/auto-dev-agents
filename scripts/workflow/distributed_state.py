@@ -1,16 +1,18 @@
 """
-分布式状态管理 - 支持断点续传
+分布式状态管理 - 支持断点续传和增量更新
 
 状态文件分布：
-- project.json                    # 项目根目录：项目元信息
+- project.json                    # 项目元信息
+- input_state.json                # 输入文件状态（哈希）
 - output/.stage_status.json       # 阶段执行状态
 - output/{stage}/.subtask_status.json  # 子任务状态（与输出目录同级）
 """
 
 import json
+import hashlib
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Set
 from dataclasses import dataclass, asdict, field
 import threading
 
@@ -26,6 +28,7 @@ class SubtaskStatus:
     output_dir: Optional[str] = None
     output_files_count: Optional[int] = None
     error: Optional[str] = None
+    input_hash: Optional[str] = None  # 新增：执行时的输入哈希
 
 
 @dataclass 
@@ -37,6 +40,7 @@ class StageStatus:
     completed_at: Optional[str] = None
     duration_ms: Optional[int] = None
     subtasks: Dict[str, SubtaskStatus] = field(default_factory=dict)
+    input_hash: Optional[str] = None  # 新增：执行时的输入哈希
 
 
 @dataclass
@@ -52,15 +56,49 @@ class ProjectMeta:
     updated_at: Optional[str] = None
 
 
+@dataclass
+class InputChange:
+    """输入变化"""
+    path: str
+    change_type: str  # new, modified, deleted
+    old_hash: Optional[str] = None
+    new_hash: Optional[str] = None
+
+
 class DistributedStateManager:
-    """分布式状态管理器"""
+    """分布式状态管理器 - 支持断点续传和增量更新"""
+    
+    # 输入目录到阶段的映射
+    INPUT_TO_STAGE = {
+        "feedback": "requirement",
+        "meetings": "requirement",
+        "emails": "requirement",
+        "tickets": "optimizer"
+    }
+    
+    # 阶段依赖关系（下游依赖上游）
+    STAGE_DEPS = {
+        "design": ["requirement"],
+        "development": ["design"],
+        "testing": ["development"],
+        "deployment": ["testing"],
+        "operations": ["deployment"],
+        "monitor": ["operations"],
+        "optimizer": ["monitor"]
+    }
+    
+    # 所有阶段（按执行顺序）
+    ALL_STAGES = ["requirement", "design", "development", "testing", 
+                  "deployment", "operations", "monitor", "optimizer"]
     
     def __init__(self, project_dir: Path):
         self.project_dir = Path(project_dir)
+        self.input_dir = self.project_dir / "input"
         self.output_dir = self.project_dir / "output"
         
         # 状态文件路径
         self.project_meta_file = self.project_dir / "project.json"
+        self.input_state_file = self.project_dir / "input_state.json"
         self.stage_status_file = self.output_dir / ".stage_status.json"
         
         # 锁，防止并发写入
@@ -352,6 +390,245 @@ class DistributedStateManager:
             "progress_percent": round(completed / len(all_subtasks) * 100, 1) if all_subtasks else 0
         }
     
+    # ========== 增量更新功能 ==========
+    
+    def _file_hash(self, path: Path) -> str:
+        """计算文件 MD5 哈希"""
+        if not path.exists():
+            return ""
+        try:
+            return hashlib.md5(path.read_bytes()).hexdigest()
+        except Exception:
+            return ""
+    
+    def _load_input_state(self) -> Dict:
+        """加载输入文件状态"""
+        if self.input_state_file.exists():
+            try:
+                return json.loads(self.input_state_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {"file_hashes": {}, "last_scan": None}
+    
+    def _save_input_state(self, state: Dict):
+        """保存输入文件状态"""
+        with self._lock:
+            state["last_scan"] = datetime.now().isoformat()
+            self.input_state_file.write_text(
+                json.dumps(state, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+    
+    def scan_input_files(self) -> Dict[str, str]:
+        """扫描所有输入文件并计算哈希"""
+        hashes = {}
+        
+        if not self.input_dir.exists():
+            return hashes
+        
+        for subdir in self.INPUT_TO_STAGE.keys():
+            dir_path = self.input_dir / subdir
+            if dir_path.exists():
+                for f in dir_path.rglob("*"):
+                    if f.is_file() and not f.name.startswith("."):
+                        relative_path = f.relative_to(self.input_dir)
+                        hashes[str(relative_path)] = self._file_hash(f)
+        
+        return hashes
+    
+    def detect_input_changes(self) -> Dict[str, Any]:
+        """检测输入文件变化
+        
+        Returns:
+            {
+                "has_changes": bool,
+                "changes": [InputChange, ...],
+                "affected_stages": [str, ...],
+                "affected_subtasks": {stage: [subtask, ...], ...}
+            }
+        """
+        old_state = self._load_input_state()
+        old_hashes = old_state.get("file_hashes", {})
+        current_hashes = self.scan_input_files()
+        
+        # 检测变化
+        changes = []
+        for path, new_hash in current_hashes.items():
+            if path not in old_hashes:
+                changes.append(InputChange(path=path, change_type="new", new_hash=new_hash))
+            elif old_hashes[path] != new_hash:
+                changes.append(InputChange(
+                    path=path, 
+                    change_type="modified",
+                    old_hash=old_hashes[path],
+                    new_hash=new_hash
+                ))
+        
+        for path, old_hash in old_hashes.items():
+            if path not in current_hashes:
+                changes.append(InputChange(path=path, change_type="deleted", old_hash=old_hash))
+        
+        # 分析受影响的阶段
+        affected_stages = self._analyze_affected_stages(changes)
+        
+        # 分析受影响的子任务（更细粒度）
+        affected_subtasks = self._analyze_affected_subtasks(changes, affected_stages)
+        
+        # 保存新状态
+        self._save_input_state({"file_hashes": current_hashes})
+        
+        return {
+            "has_changes": bool(changes),
+            "changes": [asdict(c) for c in changes],
+            "affected_stages": affected_stages,
+            "affected_subtasks": affected_subtasks,
+            "stats": {
+                "total_files": len(current_hashes),
+                "new": sum(1 for c in changes if c.change_type == "new"),
+                "modified": sum(1 for c in changes if c.change_type == "modified"),
+                "deleted": sum(1 for c in changes if c.change_type == "deleted")
+            }
+        }
+    
+    def _analyze_affected_stages(self, changes: List[InputChange]) -> List[str]:
+        """分析受影响的阶段（包含依赖传播）"""
+        directly_affected: Set[str] = set()
+        
+        for change in changes:
+            subdir = change.path.split("/")[0]
+            stage = self.INPUT_TO_STAGE.get(subdir)
+            if stage:
+                directly_affected.add(stage)
+        
+        # 传播到下游阶段
+        all_affected = set(directly_affected)
+        for stage in self.ALL_STAGES:
+            deps = self.STAGE_DEPS.get(stage, [])
+            if any(d in all_affected for d in deps):
+                all_affected.add(stage)
+        
+        # 按执行顺序返回
+        return [s for s in self.ALL_STAGES if s in all_affected]
+    
+    def _analyze_affected_subtasks(self, changes: List[InputChange], 
+                                    affected_stages: List[str]) -> Dict[str, List[str]]:
+        """分析受影响的子任务（细粒度增量）
+        
+        策略：
+        1. requirement 阶段：所有子任务都要重跑（输入是整个需求）
+        2. design/development 阶段：可以根据变化的模块推断受影响的子任务
+        """
+        affected_subtasks = {}
+        
+        for stage in affected_stages:
+            # 获取该阶段的所有子任务
+            subtask_status = self.load_subtask_status(stage)
+            
+            if not subtask_status:
+                # 没有历史状态，需要执行所有子任务
+                continue
+            
+            # 根据阶段和变化类型决定哪些子任务需要重跑
+            if stage == "requirement":
+                # 需求阶段：所有子任务都要重跑
+                affected_subtasks[stage] = list(subtask_status.keys())
+            
+            elif stage == "design":
+                # 设计阶段：依赖需求阶段的输出
+                # 如果 requirement 有变化，所有设计子任务都要重跑
+                if "requirement" in affected_stages:
+                    affected_subtasks[stage] = list(subtask_status.keys())
+            
+            elif stage == "development":
+                # 开发阶段：可以根据模块推断
+                # 简化处理：如果上游有变化，所有开发子任务都要重跑
+                if "design" in affected_stages or "requirement" in affected_stages:
+                    affected_subtasks[stage] = list(subtask_status.keys())
+            
+            else:
+                # 其他阶段：上游有变化则全部重跑
+                deps = self.STAGE_DEPS.get(stage, [])
+                if any(d in affected_stages for d in deps):
+                    affected_subtasks[stage] = list(subtask_status.keys())
+        
+        return affected_subtasks
+    
+    def get_incremental_plan(self, stages_to_run: List[str] = None) -> Dict[str, Any]:
+        """获取增量执行计划
+        
+        Args:
+            stages_to_run: 指定要运行阶段（None 表示检测所有阶段）
+        
+        Returns:
+            {
+                "mode": "full" | "incremental" | "none",
+                "reason": str,
+                "stages_to_run": [str, ...],
+                "subtasks_to_run": {stage: [subtask, ...], ...},
+                "changes": {...}
+            }
+        """
+        # 检测输入变化
+        change_result = self.detect_input_changes()
+        
+        # 首次运行检测
+        old_state = self._load_input_state()
+        if not old_state.get("last_scan"):
+            # 首次运行，全量执行
+            return {
+                "mode": "full",
+                "reason": "首次运行",
+                "stages_to_run": stages_to_run or self.ALL_STAGES,
+                "subtasks_to_run": {},
+                "changes": {}
+            }
+        
+        # 无变化
+        if not change_result["has_changes"]:
+            return {
+                "mode": "none",
+                "reason": "输入无变化",
+                "stages_to_run": [],
+                "subtasks_to_run": {},
+                "changes": {}
+            }
+        
+        # 有变化，增量执行
+        affected_stages = change_result["affected_stages"]
+        
+        # 如果指定了阶段，取交集
+        if stages_to_run:
+            affected_stages = [s for s in affected_stages if s in stages_to_run]
+        
+        # 获取需要重跑的子任务
+        subtasks_to_run = {}
+        for stage in affected_stages:
+            pending = self.get_pending_subtasks(stage, self._get_stage_subtasks(stage))
+            if pending:
+                subtasks_to_run[stage] = pending
+            elif change_result["affected_subtasks"].get(stage):
+                subtasks_to_run[stage] = change_result["affected_subtasks"][stage]
+        
+        return {
+            "mode": "incremental",
+            "reason": f"检测到 {len(change_result['changes'])} 个文件变化",
+            "stages_to_run": affected_stages,
+            "subtasks_to_run": subtasks_to_run,
+            "changes": change_result
+        }
+    
+    def _get_stage_subtasks(self, stage: str) -> List[str]:
+        """获取阶段的所有子任务名称"""
+        from workflow.models import STAGE_SUBTASKS
+        subtasks = STAGE_SUBTASKS.get(stage, [])
+        return [s.get("name", s) if isinstance(s, dict) else s for s in subtasks]
+    
+    def reset_incremental_state(self):
+        """重置增量状态"""
+        if self.input_state_file.exists():
+            self.input_state_file.unlink()
+        print("✅ 增量状态已重置")
+    
     # ========== 调试工具 ==========
     
     def print_status(self, stage: str = None):
@@ -365,12 +642,22 @@ class DistributedStateManager:
         print(f"\n📁 项目: {meta.project_name or meta.name}")
         print(f"   包名: {meta.package_name or '未设置'}")
         
+        # 输入状态
+        input_state = self._load_input_state()
+        if input_state.get("last_scan"):
+            print(f"\n📥 输入文件: {len(input_state.get('file_hashes', {}))} 个")
+            print(f"   上次扫描: {input_state['last_scan']}")
+        
         # 阶段状态
         stages = self.load_stage_status()
         print(f"\n📅 阶段状态:")
-        for name, stage in stages.items():
-            status_emoji = {"completed": "✅", "in_progress": "🔄", "failed": "❌", "pending": "⏳"}
-            print(f"   {status_emoji.get(stage.status, '❓')} {name}: {stage.status}")
+        for name in self.ALL_STAGES:
+            stage = stages.get(name)
+            if stage:
+                status_emoji = {"completed": "✅", "in_progress": "🔄", "failed": "❌", "pending": "⏳"}
+                print(f"   {status_emoji.get(stage.status, '❓')} {name}: {stage.status}")
+            else:
+                print(f"   ⏳ {name}: pending")
         
         # 子任务状态
         if stage:
