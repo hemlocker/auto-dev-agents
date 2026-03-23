@@ -96,6 +96,20 @@ execution:
   
   # 超时（秒）
   timeout_seconds: 1800  # 30 分钟
+  
+  # 上下文限制配置
+  context:
+    # 最大输入 token 数（超过则分批）
+    max_input_tokens: 50000
+    
+    # 单文件最大 KB（超过警告）
+    max_file_size_kb: 100
+    
+    # 最大文件数（超过则分批）
+    max_file_count: 30
+    
+    # 分批时每批文件数
+    batch_size: 10
 
 # 反馈机制
 feedback:

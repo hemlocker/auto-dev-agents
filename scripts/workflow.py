@@ -75,6 +75,114 @@ if not GATEWAY_TOKEN:
     GATEWAY_TOKEN = _load_gateway_token()
 
 
+# ==================== 输入分析器 ====================
+
+class InputAnalyzer:
+    """输入分析器 - 检查大小并决定处理策略"""
+    
+    # Token 估算参数
+    CHARS_PER_TOKEN = 2  # 中文约 2 字符/token
+    DEFAULT_MAX_TOKENS = 50000  # 默认最大输入 token
+    DEFAULT_MAX_FILES = 30  # 默认最大文件数
+    DEFAULT_BATCH_SIZE = 10  # 默认每批文件数
+    SUPPORTED_EXTENSIONS = [".md", ".txt", ".json", ".yaml", ".yml"]
+    
+    def __init__(self, input_dir: Path, config: dict = None):
+        self.input_dir = input_dir
+        self.config = config or {}
+        
+        # 从配置读取参数
+        context_config = self.config.get("context", {})
+        self.max_tokens = context_config.get("max_input_tokens", self.DEFAULT_MAX_TOKENS)
+        self.max_files = context_config.get("max_file_count", self.DEFAULT_MAX_FILES)
+        self.batch_size = context_config.get("batch_size", self.DEFAULT_BATCH_SIZE)
+    
+    def analyze(self) -> dict:
+        """分析输入目录
+        
+        Returns:
+            dict: 包含文件统计和处理建议
+        """
+        files = list(self._scan_files())
+        
+        total_size = sum(f["size"] for f in files)
+        total_tokens = self._estimate_tokens(total_size)
+        
+        needs_batch = (
+            total_tokens > self.max_tokens or 
+            len(files) > self.max_files
+        )
+        
+        return {
+            "file_count": len(files),
+            "total_size_kb": round(total_size / 1024, 2),
+            "estimated_tokens": total_tokens,
+            "max_tokens": self.max_tokens,
+            "needs_batch": needs_batch,
+            "reason": self._get_batch_reason(files, total_tokens),
+            "files": files
+        }
+    
+    def _scan_files(self) -> iter:
+        """扫描输入文件"""
+        if not self.input_dir.exists():
+            return
+        
+        for f in self.input_dir.rglob("*"):
+            if f.is_file() and f.suffix.lower() in self.SUPPORTED_EXTENSIONS:
+                yield {
+                    "path": str(f),
+                    "size": f.stat().st_size,
+                    "relative": str(f.relative_to(self.input_dir))
+                }
+    
+    def _estimate_tokens(self, size_bytes: int) -> int:
+        """估算 token 数量"""
+        return size_bytes // self.CHARS_PER_TOKEN
+    
+    def _get_batch_reason(self, files: list, total_tokens: int) -> str:
+        """获取需要分批的原因"""
+        reasons = []
+        if total_tokens > self.max_tokens:
+            reasons.append(f"预估 {total_tokens} tokens 超过限制 {self.max_tokens}")
+        if len(files) > self.max_files:
+            reasons.append(f"文件数 {len(files)} 超过限制 {self.max_files}")
+        return "; ".join(reasons) if reasons else "无需分批"
+    
+    def generate_batch_plan(self, analysis: dict) -> List[dict]:
+        """生成分批计划
+        
+        Args:
+            analysis: analyze() 返回的分析结果
+            
+        Returns:
+            List[dict]: 批次计划列表
+        """
+        if not analysis["needs_batch"]:
+            return [{
+                "batch": 1,
+                "files": analysis["files"],
+                "total_batches": 1,
+                "is_full": True
+            }]
+        
+        files = analysis["files"]
+        # 按文件大小排序，大的优先（确保关键文件在前面）
+        files_sorted = sorted(files, key=lambda x: x["size"], reverse=True)
+        
+        batches = []
+        for i in range(0, len(files_sorted), self.batch_size):
+            batch_files = files_sorted[i:i + self.batch_size]
+            batches.append({
+                "batch": i // self.batch_size + 1,
+                "files": batch_files,
+                "total_batches": (len(files_sorted) + self.batch_size - 1) // self.batch_size,
+                "is_full": False
+            })
+        
+        return batches
+
+
 # ==================== 数据类定义 ====================
 
 @dataclass
@@ -460,8 +568,14 @@ class WorkflowExecutor:
 
         return None, None
 
-    def _generate_spawn_config(self, stage: str, phase: str = None) -> dict:
-        """生成 sessions_spawn 配置"""
+    def _generate_spawn_config(self, stage: str, phase: str = None, batch_info: dict = None) -> dict:
+        """生成 sessions_spawn 配置
+        
+        Args:
+            stage: 阶段名称
+            phase: PDCA 阶段
+            batch_info: 分批信息（可选）
+        """
         stage_config = self.stage_map.get(stage)
         
         # 从阶段配置获取属性
@@ -476,6 +590,26 @@ class WorkflowExecutor:
             timeout = self.config["execution"].get("timeout_seconds", 1800)
         
         prompt = self._load_prompt(stage)
+        
+        # 生成分批任务描述
+        if batch_info and not batch_info.get("is_full"):
+            file_list = "\n".join(f"  - {f['relative']} ({f['size']} bytes)" for f in batch_info["files"])
+            batch_context = f"""
+## ⚠️ 分批处理说明
+
+**这是第 {batch_info['batch']} 批，共 {batch_info['total_batches']} 批**
+
+### 本次处理文件
+{file_list}
+
+### 处理要求
+1. 只处理上述文件列表中的内容
+2. 分析结果追加到输出目录（不要覆盖已有内容）
+3. 如果是多批次，请在输出中标注批次信息
+4. 最后一批完成后生成汇总报告
+"""
+        else:
+            batch_context = f"\n## 任务\n请根据输入完成 {stage} 阶段的工作，结果写入输出目录。"
 
         task = f"""# 项目: {self.project_name} | PDCA 阶段: {phase.upper()} | 智能体: {stage}
 
@@ -487,10 +621,12 @@ class WorkflowExecutor:
 
 ## 输出目录
 {output_path}
-
-## 任务
-请根据输入完成 {stage} 阶段的工作，结果写入输出目录。
+{batch_context}
 """
+
+        label = f"{self.project_name}_{phase}_{stage}"
+        if batch_info and not batch_info.get("is_full"):
+            label += f"_batch{batch_info['batch']}"
 
         return {
             "action": "sessions_spawn",
@@ -500,12 +636,13 @@ class WorkflowExecutor:
                 "task": task,
                 "cwd": str(self.base_dir),
                 "timeoutSeconds": timeout,
-                "label": f"{self.project_name}_{phase}_{stage}"
+                "label": label
             },
             "stage": stage,
             "phase": phase,
             "input_dir": str(input_path),
-            "output_dir": str(output_path)
+            "output_dir": str(output_path),
+            "batch_info": batch_info
         }
 
     # ==================== 执行模式 ====================
@@ -566,12 +703,34 @@ class WorkflowExecutor:
             passed, missing = self._check_dependencies(stage)
             if not passed:
                 raise DependencyError(stage, missing)
-
-        spawn_config = self._generate_spawn_config(stage, phase)
+        
+        # 分析输入，决定是否分批
+        input_path = self.project_dir / (stage_config.input_dir or "input/")
+        if self.execute:
+            analyzer = InputAnalyzer(input_path, self.config.get("execution", {}))
+            analysis = analyzer.analyze()
+            
+            if analysis["needs_batch"] and stage in ["requirement", "design", "development"]:
+                # 需要分批执行
+                return self._execute_stage_batch(stage, phase, analysis, analyzer, wait)
+        
+        # 直接执行（单批次）
+        return self._execute_stage_single(stage, phase, wait)
+    
+    def _execute_stage_single(self, stage: str, phase: str, wait: bool = True,
+                               batch_info: dict = None) -> dict:
+        """执行单个阶段（单批次）"""
+        stage_config = self.stage_map.get(stage) or StageConfig(stage, phase or "custom")
+        
+        spawn_config = self._generate_spawn_config(stage, phase, batch_info or {"is_full": True})
         start_time = time.time()
 
+        batch_label = ""
+        if batch_info and not batch_info.get("is_full"):
+            batch_label = f" [批次 {batch_info['batch']}/{batch_info['total_batches']}]"
+
         print(f"\n{'='*60}")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 执行阶段")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 执行阶段{batch_label}")
         print(f"  PDCA: {phase.upper()}")
         print(f"  智能体: {stage}")
         print(f"  输入: {spawn_config['input_dir']}")
@@ -603,7 +762,6 @@ class WorkflowExecutor:
 
             if wait:
                 # 等待子智能体完成
-                # childSessionKey 在 result.details 中
                 result_data = result.get("result", {})
                 if "details" in result_data:
                     session_key = result_data["details"].get("childSessionKey")
@@ -621,6 +779,76 @@ class WorkflowExecutor:
         spawn_config["duration"] = time.time() - start_time
         spawn_config["success"] = True
         return spawn_config
+    
+    def _execute_stage_batch(self, stage: str, phase: str, analysis: dict,
+                              analyzer: 'InputAnalyzer', wait: bool = True) -> dict:
+        """执行分批处理
+        
+        Args:
+            stage: 阶段名称
+            phase: PDCA 阶段
+            analysis: 输入分析结果
+            analyzer: 输入分析器
+            wait: 是否等待每批完成
+            
+        Returns:
+            dict: 汇总执行结果
+        """
+        batches = analyzer.generate_batch_plan(analysis)
+        
+        print(f"\n{'='*60}")
+        print(f"📦 输入较大，启用分批处理")
+        print(f"   文件数: {analysis['file_count']}")
+        print(f"   总大小: {analysis['total_size_kb']} KB")
+        print(f"   预估Token: {analysis['estimated_tokens']}")
+        print(f"   分批原因: {analysis['reason']}")
+        print(f"   批次数: {len(batches)}")
+        print(f"{'='*60}")
+        
+        start_time = time.time()
+        batch_results = []
+        
+        for batch in batches:
+            try:
+                result = self._execute_stage_single(stage, phase, wait, batch)
+                batch_results.append(result)
+                
+                # 批次间短暂延迟
+                if batch["batch"] < batch["total_batches"]:
+                    delay = self.config["execution"].get("stage_delay_seconds", 30)
+                    print(f"\n⏳ 等待 {delay}s 后处理下一批...")
+                    time.sleep(delay)
+                    
+            except (DependencyError, StageExecutionError, StageTimeoutError) as e:
+                print(f"❌ 批次 {batch['batch']} 失败: {e}")
+                batch_results.append({
+                    "batch": batch["batch"],
+                    "success": False,
+                    "error": str(e)
+                })
+                # 分批模式下继续执行其他批次
+                continue
+        
+        # 汇总结果
+        total_duration = time.time() - start_time
+        success_count = sum(1 for r in batch_results if r.get("success"))
+        
+        return {
+            "stage": stage,
+            "phase": phase,
+            "batch_mode": True,
+            "total_batches": len(batches),
+            "success_batches": success_count,
+            "failed_batches": len(batches) - success_count,
+            "duration": total_duration,
+            "success": success_count == len(batches),
+            "batch_results": batch_results,
+            "analysis": {
+                "file_count": analysis["file_count"],
+                "total_size_kb": analysis["total_size_kb"],
+                "estimated_tokens": analysis["estimated_tokens"]
+            }
+        }
 
     def _wait_for_completion(self, session_key: str, poll_interval: int = 10, max_wait: int = 3600):
         """等待子智能体完成
