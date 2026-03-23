@@ -79,17 +79,13 @@ test-data/
 ## 使用方式
 
 ```bash
-# 阶段1测试
+# 运行完整 PDCA 循环（默认）
 cp -r test-data/stage-1-initial/* projects/test-project/
-python3 scripts/workflow.py -p test-project --start
+python3 scripts/workflow.py -p test-project --full-cycle --execute
 
-# 阶段2测试（基于阶段1）
-cp -r test-data/stage-2-features/input/* projects/test-project/input/
-python3 scripts/workflow.py -p test-project --stages development,testing
-
-# 阶段3测试（基于阶段2）
-cp -r test-data/stage-3-issues/input/* projects/test-project/input/
-python3 scripts/workflow.py -p test-project --stages optimizer
+# 或使用测试脚本
+./test-data/run-test.sh              # 默认项目名: tdm-{版本号}
+./test-data/run-test.sh my-project   # 指定项目名
 ```
 
 ---

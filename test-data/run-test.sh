@@ -1,6 +1,7 @@
 #!/bin/bash
 # 标准测试运行脚本
-# 用法: ./run-test.sh <stage> [project_name]
+# 用法: ./run-test.sh [project_name]
+# 默认执行完整 PDCA 循环
 
 set -e
 
@@ -16,32 +17,28 @@ get_version() {
 # 默认项目名（短格式：tdm-{版本号}）
 DEFAULT_VERSION=$(get_version)
 DEFAULT_NAME="tdm-${DEFAULT_VERSION}"
-PROJECT_NAME="${2:-$DEFAULT_NAME}"
+PROJECT_NAME="${1:-$DEFAULT_NAME}"
 
 # 显示帮助
 show_help() {
     echo "标准测试运行脚本"
     echo ""
-    echo "用法: $0 <stage> [project_name]"
+    echo "用法: $0 [project_name]"
     echo ""
-    echo "阶段:"
-    echo "  1  - 阶段1：初始需求（完整工作流）"
-    echo "  2  - 阶段2：功能扩展（增量开发）"
-    echo "  3  - 阶段3：问题反馈（优化修复）"
-    echo "  all - 运行所有阶段"
+    echo "默认执行完整 PDCA 循环（需求→设计→开发→测试→部署→运维→监控→优化）"
     echo ""
     echo "默认项目名: $DEFAULT_NAME"
     echo ""
     echo "示例:"
-    echo "  $0 1                    # 运行阶段1测试 (项目: $DEFAULT_NAME)"
-    echo "  $0 2 my-project         # 运行阶段2测试 (项目: my-project)"
-    echo "  $0 all                  # 运行所有阶段测试"
+    echo "  $0                      # 运行完整 PDCA 循环 (项目: $DEFAULT_NAME)"
+    echo "  $0 my-project           # 运行完整 PDCA 循环 (项目: my-project)"
+    echo "  $0 --help               # 显示帮助"
 }
 
-# 阶段1：初始需求
-run_stage1() {
+# 运行完整 PDCA 循环
+run_full_cycle() {
     echo "=========================================="
-    echo "阶段1：初始需求测试"
+    echo "完整 PDCA 循环测试"
     echo "项目名: $PROJECT_NAME"
     echo "=========================================="
     
@@ -57,71 +54,19 @@ run_stage1() {
     cp -r "$SCRIPT_DIR/stage-1-initial/"* "$PROJECTS_DIR/$PROJECT_NAME/"
     
     echo ""
-    echo "启动完整工作流..."
-    cd "$(dirname "$SCRIPT_DIR")"
-    python3 scripts/workflow.py -p "$PROJECT_NAME" --start --execute
-}
-
-# 阶段2：功能扩展
-run_stage2() {
-    echo "=========================================="
-    echo "阶段2：功能扩展测试"
-    echo "项目名: $PROJECT_NAME"
-    echo "=========================================="
-    
-    if [ ! -d "$PROJECTS_DIR/$PROJECT_NAME" ]; then
-        echo "❌ 项目不存在，请先运行阶段1"
-        exit 1
-    fi
-    
-    echo "添加新功能需求..."
-    cp -r "$SCRIPT_DIR/stage-2-features/input/"* "$PROJECTS_DIR/$PROJECT_NAME/input/"
-    
+    echo "启动完整 PDCA 循环..."
+    echo "  PLAN: requirement, design"
+    echo "  DO: development, testing, deployment"
+    echo "  CHECK: operations, monitor"
+    echo "  ACT: optimizer"
     echo ""
-    echo "启动增量开发工作流..."
+    
     cd "$(dirname "$SCRIPT_DIR")"
-    python3 scripts/workflow.py -p "$PROJECT_NAME" --stages development,testing --execute
-}
-
-# 阶段3：问题反馈
-run_stage3() {
-    echo "=========================================="
-    echo "阶段3：问题反馈测试"
-    echo "项目名: $PROJECT_NAME"
-    echo "=========================================="
-    
-    if [ ! -d "$PROJECTS_DIR/$PROJECT_NAME" ]; then
-        echo "❌ 项目不存在，请先运行阶段1"
-        exit 1
-    fi
-    
-    echo "添加问题工单..."
-    cp -r "$SCRIPT_DIR/stage-3-issues/input/"* "$PROJECTS_DIR/$PROJECT_NAME/input/"
-    
-    echo ""
-    echo "启动优化工作流..."
-    cd "$(dirname "$SCRIPT_DIR")"
-    python3 scripts/workflow.py -p "$PROJECT_NAME" --stages monitor,optimizer --execute
+    python3 scripts/workflow.py -p "$PROJECT_NAME" --full-cycle --execute
 }
 
 # 主逻辑
 case "${1:-}" in
-    1) run_stage1 ;;
-    2) run_stage2 ;;
-    3) run_stage3 ;;
-    all)
-        run_stage1
-        sleep 10
-        run_stage2
-        sleep 10
-        run_stage3
-        echo ""
-        echo "所有阶段测试完成！"
-        ;;
     -h|--help|help) show_help ;;
-    *)
-        echo "❌ 未知阶段: $1"
-        show_help
-        exit 1
-        ;;
+    *) run_full_cycle ;;
 esac
