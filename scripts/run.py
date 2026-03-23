@@ -39,6 +39,7 @@ from typing import Optional, Dict, List, Tuple
 from workflow.models import StageConfig, STAGE_SUBTASKS, WorkflowError, StageExecutionError, StageTimeoutError, DependencyError
 from workflow.executors import InputAnalyzer, SubtaskExecutor, SubagentExecutor, http_post
 from workflow.state import WorkflowState
+from workflow.distributed_state import DistributedStateManager
 
 
 # ==================== WorkflowExecutor ====================
@@ -71,6 +72,9 @@ class WorkflowExecutor:
         self.execute = execute
         self.subagent_executor = SubagentExecutor() if execute else None
         self.state = WorkflowState(self.project_dir)
+        
+        # 分布式状态管理器（支持断点续传）
+        self.dist_state = DistributedStateManager(self.project_dir)
         
         # 项目类型（从参数或配置读取）
         self.project_type = project_type or self.config.get("projects", {}).get("type", "fullstack")
@@ -197,8 +201,19 @@ class WorkflowExecutor:
                 ...
             }
         """
+        # 优先从 DistributedStateManager 读取
+        meta = self.dist_state.load_project_meta()
+        if meta.package_name:
+            return {
+                "project_name": meta.project_name or meta.name,
+                "package_name": meta.package_name,
+                "package_path": meta.package_path,
+                "backend_language": meta.backend_language,
+                "frontend_framework": meta.frontend_framework
+            }
+        
         # 尝试从 project.json 读取
-        project_file = self.output_dir / "project.json"
+        project_file = self.project_dir / "project.json"
         if project_file.exists():
             try:
                 return json.loads(project_file.read_text(encoding="utf-8"))
@@ -211,6 +226,8 @@ class WorkflowExecutor:
             content = sw_req_file.read_text(encoding="utf-8")
             meta = self._extract_meta_from_requirements(content)
             if meta:
+                # 保存到 DistributedStateManager
+                self.dist_state.update_project_meta(**meta)
                 return meta
         
         # 尝试从架构设计文档提取
@@ -219,6 +236,7 @@ class WorkflowExecutor:
             content = arch_file.read_text(encoding="utf-8")
             meta = self._extract_meta_from_architecture(content)
             if meta:
+                self.dist_state.update_project_meta(**meta)
                 return meta
         
         # 默认值：从项目名称生成
@@ -646,21 +664,55 @@ class WorkflowExecutor:
     def _execute_stage_subtasks(self, stage: str, phase: str, 
                                   subtask_executor: SubtaskExecutor,
                                   output_dir: Path, wait: bool = True) -> dict:
-        """使用子任务增量执行阶段（严格串行）"""
+        """使用子任务增量执行阶段（支持断点续传）"""
         execution_plan = subtask_executor.get_execution_plan()
+        all_subtask_names = [s["name"] for s in execution_plan]
+        
+        # 🔍 检查已完成的子任务（断点续传）
+        pending_subtask_names = self.dist_state.get_pending_subtasks(stage, all_subtask_names)
+        completed_subtask_names = self.dist_state.get_completed_subtasks(stage)
+        
+        # 打印进度
+        progress = self.dist_state.get_progress(stage, all_subtask_names)
         
         print(f"\n{'='*60}")
         print(f"📦 阶段 {stage} 使用子任务增量执行")
-        print(f"   子任务数: {len(execution_plan)}")
-        print(f"   执行模式: 严格串行（一次只运行一个子任务）")
+        print(f"   总子任务数: {len(execution_plan)}")
+        print(f"   已完成: {progress['completed']} | 待执行: {len(pending_subtask_names)}")
+        print(f"   进度: {progress['progress_percent']}%")
+        print(f"   执行模式: 严格串行 + 断点续传")
         print(f"{'='*60}")
+        
+        # 如果所有子任务都已完成
+        if not pending_subtask_names:
+            print(f"✅ 阶段 {stage} 所有子任务已完成，跳过执行")
+            return {
+                "stage": stage,
+                "phase": phase,
+                "subtask_mode": True,
+                "skipped": True,
+                "total_subtasks": len(execution_plan),
+                "success_subtasks": len(completed_subtask_names),
+                "message": "所有子任务已完成"
+            }
         
         start_time = time.time()
         subtask_results = []
         current_session_key = None  # 追踪当前子任务的 session
         
+        # 标记阶段开始
+        self.dist_state.update_stage(stage, status="in_progress", 
+                                      started_at=datetime.now().isoformat())
+        
         for i, subtask in enumerate(execution_plan):
             subtask_name = subtask["name"]
+            
+            # ⏭️ 跳过已完成的子任务
+            if subtask_name in completed_subtask_names:
+                print(f"\n{'─'*40}")
+                print(f"[{i+1}/{len(execution_plan)}] ⏭️ 跳过已完成的子任务: {subtask_name}")
+                continue
+            
             print(f"\n{'─'*40}")
             print(f"[{i+1}/{len(execution_plan)}] 子任务: {subtask_name}")
             print(f"   描述: {subtask['description']}")
@@ -672,6 +724,10 @@ class WorkflowExecutor:
                     print(f"   ⚠️ 存在活跃子智能体，强制等待...")
                     self._wait_for_no_active_subagents(max_wait=300)
             
+            # 标记子任务开始
+            subtask_start = time.time()
+            self.dist_state.start_subtask(stage, subtask_name)
+            
             try:
                 task_prompt = subtask_executor.generate_subtask_prompt(
                     subtask, {"output_dir": output_dir}
@@ -681,6 +737,8 @@ class WorkflowExecutor:
                     stage, phase, subtask_name, task_prompt, output_dir, wait
                 )
                 current_session_key = session_key
+                
+                subtask_duration = int((time.time() - subtask_start) * 1000)
                 
                 if result.get("success"):
                     new_files = result.get("output_files", [])
@@ -692,8 +750,16 @@ class WorkflowExecutor:
                         "summary": subtask["description"]
                     })
                     
-                    # ✅ 立即更新状态
-                    self.state.update_stage(phase, f"{stage}:{subtask_name}")
+                    # ✅ 标记子任务完成（分布式状态）
+                    self.dist_state.complete_subtask(
+                        stage, subtask_name,
+                        duration_ms=subtask_duration,
+                        output_dir=result.get("output_dir"),
+                        output_files_count=len(new_files)
+                    )
+                    
+                    # 更新已完成的子任务列表（用于后续跳过）
+                    completed_subtask_names.append(subtask_name)
                 else:
                     print(f"   ⚠️ 子任务可能不完整: {result.get('error', '未知')}")
                     subtask_executor.record_result(subtask_name, {
@@ -701,6 +767,9 @@ class WorkflowExecutor:
                         "error": result.get("error"),
                         "summary": subtask["description"]
                     })
+                    
+                    # 标记子任务失败
+                    self.dist_state.fail_subtask(stage, subtask_name, error=result.get("error"))
                 
                 subtask_results.append({
                     "subtask": subtask_name,
@@ -717,6 +786,7 @@ class WorkflowExecutor:
                     
             except Exception as e:
                 print(f"   ❌ 子任务失败: {e}")
+                self.dist_state.fail_subtask(stage, subtask_name, error=str(e))
                 subtask_results.append({
                     "subtask": subtask_name,
                     "success": False,
@@ -727,14 +797,23 @@ class WorkflowExecutor:
         total_duration = time.time() - start_time
         success_count = sum(1 for r in subtask_results if r.get("success"))
         
+        # 重新获取进度
+        final_progress = self.dist_state.get_progress(stage, all_subtask_names)
+        
         print(f"\n{'='*60}")
         print(f"📊 阶段 {stage} 子任务执行完成")
-        print(f"   成功: {success_count}/{len(execution_plan)}")
+        print(f"   成功: {final_progress['completed']}/{len(execution_plan)}")
+        print(f"   失败: {final_progress['failed']}")
         print(f"   耗时: {total_duration:.1f}s")
         print(f"{'='*60}")
         
         # ✅ 阶段完成后更新状态
-        if success_count == len(execution_plan):
+        if final_progress['completed'] == len(execution_plan):
+            self.dist_state.update_stage(
+                stage, status="completed",
+                completed_at=datetime.now().isoformat(),
+                duration_ms=int(total_duration * 1000)
+            )
             self.state.update_stage(phase, stage)
         
         return {
@@ -742,10 +821,10 @@ class WorkflowExecutor:
             "phase": phase,
             "subtask_mode": True,
             "total_subtasks": len(execution_plan),
-            "success_subtasks": success_count,
-            "failed_subtasks": len(execution_plan) - success_count,
+            "success_subtasks": final_progress['completed'],
+            "failed_subtasks": final_progress['failed'],
             "duration": total_duration,
-            "success": success_count == len(execution_plan),
+            "success": final_progress['completed'] == len(execution_plan),
             "subtask_results": subtask_results,
             "summary": subtask_executor.get_summary()
         }
@@ -988,12 +1067,31 @@ class WorkflowExecutor:
             time.sleep(interval)
 
     def status(self) -> dict:
-        """获取状态"""
+        """获取状态（包含断点续传信息）"""
         project_info = self._load_project_info()
+        project_meta = self.dist_state.load_project_meta()
+        
+        # 获取各阶段的子任务进度
+        stage_progress = {}
+        for stage in self.stages:
+            subtasks = STAGE_SUBTASKS.get(stage.name, [])
+            if subtasks:
+                progress = self.dist_state.get_progress(stage.name, 
+                    [s.get("name", s) if isinstance(s, dict) else s for s in subtasks])
+                stage_progress[stage.name] = progress
+        
         return {
             "project": self.project_name,
             "project_dir": str(self.project_dir),
+            "project_meta": {
+                "name": project_meta.name,
+                "project_name": project_meta.project_name,
+                "package_name": project_meta.package_name,
+                "backend_language": project_meta.backend_language,
+                "frontend_framework": project_meta.frontend_framework
+            },
             "goal": project_info.get("goal", "未设置"),
+            "stage_progress": stage_progress,
             **self.state.get_status(),
             "config": {
                 "max_cycles": self.config["pdca"].get("max_cycles", 0),
@@ -1085,6 +1183,14 @@ def main():
         result = executor.status()
         result["stages"] = [s.name for s in executor.stages]
         print(json.dumps(result, indent=2, ensure_ascii=False))
+        
+        # 打印断点续传状态
+        print("\n" + "=" * 60)
+        print("📊 断点续传状态")
+        print("=" * 60)
+        executor.dist_state.print_status(
+            stage=args.stages.split(",")[0] if args.stages else None
+        )
 
     elif args.pause:
         executor.state.pause()
