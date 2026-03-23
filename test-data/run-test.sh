@@ -59,7 +59,7 @@ run_stage1() {
     echo ""
     echo "启动完整工作流..."
     cd "$(dirname "$SCRIPT_DIR")"
-    python3 scripts/workflow.py -p "$PROJECT_NAME" --start
+    python3 scripts/workflow.py -p "$PROJECT_NAME" --start --execute
 }
 
 # 阶段2：功能扩展
@@ -80,7 +80,7 @@ run_stage2() {
     echo ""
     echo "启动增量开发工作流..."
     cd "$(dirname "$SCRIPT_DIR")"
-    python3 scripts/workflow.py -p "$PROJECT_NAME" --stages development,testing
+    python3 scripts/workflow.py -p "$PROJECT_NAME" --stages development,testing --execute
 }
 
 # 阶段3：问题反馈
@@ -101,7 +101,7 @@ run_stage3() {
     echo ""
     echo "启动优化工作流..."
     cd "$(dirname "$SCRIPT_DIR")"
-    python3 scripts/workflow.py -p "$PROJECT_NAME" --stages monitor,optimizer
+    python3 scripts/workflow.py -p "$PROJECT_NAME" --stages monitor,optimizer --execute
 }
 
 # 主逻辑
