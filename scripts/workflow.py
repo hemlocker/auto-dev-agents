@@ -4,10 +4,10 @@
 工作流执行器
 Workflow Executor
 
-统一的开发工作流执行器，整合了：
-- run_workflow.py: 指定阶段运行
-- pdca_workflow.py: PDCA 循环调度
-- auto_executor.py: 自动循环执行
+统一的开发工作流执行器，提供：
+- 阶段执行（单次/批量/子任务）
+- 状态管理
+- 日志记录
 
 使用方式：
   # 查看状态
@@ -20,622 +20,28 @@ Workflow Executor
   python3 scripts/workflow.py --project my_project --stages requirement,design
 
   # 运行完整 PDCA 循环
-  python3 scripts/workflow.py --project my_project --full-cycle
+  python3 scripts/workflow.py --project my_project --full-cycle --execute
 
-  # 启动持续自动执行
-  python3 scripts/workflow.py --project my_project --start
-
-  # 暂停/恢复
-  python3 scripts/workflow.py --project my_project --pause
-  python3 scripts/workflow.py --project my_project --resume
+  # 使用模板
+  python3 scripts/workflow.py --project my_project --template dev-only --execute
 """
 
 import argparse
 import json
 import re
 import time
-import subprocess
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
-from dataclasses import dataclass, field
 
-# 延迟导入 requests，如果不可用则使用 subprocess + curl
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
+# 导入拆分的模块
+from workflow.models import StageConfig, STAGE_SUBTASKS, WorkflowError, StageExecutionError, StageTimeoutError, DependencyError
+from workflow.executors import InputAnalyzer, SubtaskExecutor, SubagentExecutor
+from workflow.state import WorkflowState
 
 
-# Gateway HTTP API 配置
-GATEWAY_URL = "http://127.0.0.1:18799"
-GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", None)
-
-
-def _load_gateway_token() -> Optional[str]:
-    """从 OpenClaw 配置文件读取 Gateway token"""
-    config_path = Path.home() / ".openclaw" / "openclaw.json"
-    if config_path.exists():
-        try:
-            import json
-            with open(config_path, "r") as f:
-                config = json.load(f)
-                auth = config.get("gateway", {}).get("auth", {})
-                if auth.get("mode") == "token":
-                    return auth.get("token")
-        except:
-            pass
-    return None
-
-
-# 自动加载 Gateway token
-if not GATEWAY_TOKEN:
-    GATEWAY_TOKEN = _load_gateway_token()
-
-
-# ==================== 子任务定义 ====================
-
-# 阶段子任务拆分模板
-STAGE_SUBTASKS = {
-    "requirement": [
-        {
-            "name": "analyze_input",
-            "description": "分析输入文件，提取需求点",
-            "output_files": ["需求点清单.md"],
-            "max_tokens_estimate": 5000
-        },
-        {
-            "name": "user_requirements",
-            "description": "生成用户需求文档",
-            "depends_on": ["analyze_input"],
-            "output_files": ["user_requirements.md"],
-            "max_tokens_estimate": 8000
-        },
-        {
-            "name": "software_requirements",
-            "description": "生成软件需求规格",
-            "depends_on": ["user_requirements"],
-            "output_files": ["software_requirements.md"],
-            "max_tokens_estimate": 10000
-        },
-        {
-            "name": "rtm",
-            "description": "生成需求追踪矩阵",
-            "depends_on": ["software_requirements"],
-            "output_files": ["rtm.json"],
-            "max_tokens_estimate": 3000
-        }
-    ],
-    
-    "design": [
-        {
-            "name": "architecture",
-            "description": "系统架构设计",
-            "output_files": ["architecture_design.md"],
-            "max_tokens_estimate": 8000
-        },
-        {
-            "name": "data_model",
-            "description": "数据模型设计",
-            "depends_on": ["architecture"],
-            "output_files": ["data_model.md"],
-            "max_tokens_estimate": 6000
-        },
-        {
-            "name": "api_design",
-            "description": "API 接口设计",
-            "depends_on": ["data_model"],
-            "output_files": ["api_spec.md"],
-            "max_tokens_estimate": 8000
-        },
-        {
-            "name": "detailed_design",
-            "description": "详细设计文档",
-            "depends_on": ["api_design"],
-            "output_files": ["detailed_design.md"],
-            "max_tokens_estimate": 12000
-        }
-    ],
-    
-    "development": [
-        {
-            "name": "project_structure",
-            "description": "创建项目结构和配置文件",
-            "output_files": ["package.json", "requirements.txt", "*.config.*"],
-            "max_tokens_estimate": 3000
-        },
-        {
-            "name": "models",
-            "description": "创建数据模型",
-            "depends_on": ["project_structure"],
-            "output_dir": "src/models/",
-            "max_tokens_estimate": 8000
-        },
-        {
-            "name": "repositories",
-            "description": "创建数据访问层",
-            "depends_on": ["models"],
-            "output_dir": "src/repositories/",
-            "max_tokens_estimate": 6000
-        },
-        {
-            "name": "services",
-            "description": "创建业务逻辑层",
-            "depends_on": ["repositories"],
-            "output_dir": "src/services/",
-            "max_tokens_estimate": 10000
-        },
-        {
-            "name": "controllers",
-            "description": "创建控制器层",
-            "depends_on": ["services"],
-            "output_dir": "src/controllers/",
-            "max_tokens_estimate": 8000
-        },
-        {
-            "name": "frontend_components",
-            "description": "创建前端组件",
-            "depends_on": ["controllers"],
-            "output_dir": "src/frontend/components/",
-            "max_tokens_estimate": 10000
-        },
-        {
-            "name": "frontend_pages",
-            "description": "创建前端页面",
-            "depends_on": ["frontend_components"],
-            "output_dir": "src/frontend/pages/",
-            "max_tokens_estimate": 10000
-        }
-    ],
-    
-    "testing": [
-        {
-            "name": "unit_tests",
-            "description": "编写单元测试",
-            "output_dir": "tests/unit/",
-            "max_tokens_estimate": 10000
-        },
-        {
-            "name": "integration_tests",
-            "description": "编写集成测试",
-            "depends_on": ["unit_tests"],
-            "output_dir": "tests/integration/",
-            "max_tokens_estimate": 8000
-        },
-        {
-            "name": "test_report",
-            "description": "生成测试报告",
-            "depends_on": ["integration_tests"],
-            "output_files": ["测试报告.md"],
-            "max_tokens_estimate": 3000
-        }
-    ],
-    
-    "deployment": [
-        {
-            "name": "docker_config",
-            "description": "创建 Docker 配置",
-            "output_files": ["Dockerfile", "docker-compose.yml"],
-            "max_tokens_estimate": 5000
-        },
-        {
-            "name": "nginx_config",
-            "description": "创建 Nginx 配置",
-            "output_files": ["nginx.conf"],
-            "max_tokens_estimate": 3000
-        },
-        {
-            "name": "deploy_scripts",
-            "description": "创建部署脚本",
-            "depends_on": ["docker_config", "nginx_config"],
-            "output_files": ["deploy.sh", "rollback.sh"],
-            "max_tokens_estimate": 5000
-        },
-        {
-            "name": "deploy_report",
-            "description": "生成部署文档",
-            "output_files": ["部署报告.md"],
-            "max_tokens_estimate": 3000
-        }
-    ]
-}
-
-
-class SubtaskExecutor:
-    """子任务执行器 - 处理任务拆分和增量执行"""
-    
-    def __init__(self, stage: str, output_dir: Path, base_dir: Path):
-        self.stage = stage
-        self.output_dir = output_dir
-        self.base_dir = base_dir
-        self.subtasks = STAGE_SUBTASKS.get(stage, [])
-        self.completed = set()
-        self.results = {}
-    
-    def get_execution_plan(self) -> List[dict]:
-        """获取执行计划（拓扑排序）"""
-        if not self.subtasks:
-            return []
-        
-        # 简单拓扑排序
-        ordered = []
-        remaining = list(self.subtasks)
-        
-        while remaining:
-            for subtask in remaining[:]:
-                deps = subtask.get("depends_on", [])
-                if all(d in self.completed for d in deps):
-                    ordered.append(subtask)
-                    remaining.remove(subtask)
-                    self.completed.add(subtask["name"])
-        
-        return ordered
-    
-    def generate_subtask_prompt(self, subtask: dict, context: dict) -> str:
-        """生成子任务提示词（包含增量输出）"""
-        base_prompt = self._load_stage_prompt()
-        
-        # 构建上下文信息：包含已完成的子任务输出
-        context_info = ""
-        if subtask.get("depends_on"):
-            context_info += "\n## 已完成的子任务输出\n"
-            context_info += "请先读取以下已生成的文件，作为本次任务的输入：\n\n"
-            
-            for dep in subtask["depends_on"]:
-                if dep in self.results:
-                    dep_result = self.results[dep]
-                    # 列出已生成的文件
-                    if dep_result.get("output_files"):
-                        for f in dep_result["output_files"]:
-                            context_info += f"- {f}\n"
-                    elif dep_result.get("output_dir"):
-                        context_info += f"- {dep_result['output_dir']}\n"
-                    
-                    # 摘要信息
-                    if dep_result.get("summary"):
-                        context_info += f"  （{dep_result['summary']}）\n"
-        
-        # 输出限制
-        output_limit = ""
-        if subtask.get("output_files"):
-            output_limit = f"\n## 本次输出文件\n只需输出以下文件: {', '.join(subtask['output_files'])}"
-        elif subtask.get("output_dir"):
-            output_limit = f"\n## 本次输出目录\n只需输出到: {subtask['output_dir']}"
-        
-        return f"""# 子任务: {subtask['name']}
-
-## 阶段: {self.stage}
-
-## 系统提示词
-{base_prompt[:2000]}  # 截取前 2000 字符避免过长
-
-## 任务描述
-{subtask['description']}
-{context_info}
-{output_limit}
-
-## 输出目录
-{self.output_dir}
-
-## 增量执行要求
-1. **读取前置输出**: 先读取依赖子任务生成的文件
-2. **只输出本次内容**: 不要重复输出已有文件
-3. **完成标记**: 输出完成后添加 [SUBTASK_COMPLETE: {subtask['name']}]
-4. **问题标记**: 如有问题添加 [SUBTASK_QUESTION: 问题描述]
-"""
-    
-    def record_result(self, subtask_name: str, result: dict):
-        """记录子任务结果（包含输出文件信息）"""
-        self.results[subtask_name] = result
-        self.completed.add(subtask_name)
-    
-    def scan_output_files(self, output_dir: Path) -> List[str]:
-        """扫描输出目录中已生成的文件"""
-        if not output_dir.exists():
-            return []
-        return [str(f.relative_to(output_dir)) for f in output_dir.rglob("*") if f.is_file()]
-    
-    def get_summary(self) -> dict:
-        """获取执行摘要"""
-        return {
-            "stage": self.stage,
-            "total_subtasks": len(self.subtasks),
-            "completed_subtasks": len(self.completed),
-            "results": self.results
-        }
-
-
-# ==================== 输入分析器 ====================
-
-class InputAnalyzer:
-    """输入分析器 - 检查大小并决定处理策略"""
-    
-    # Token 估算参数
-    CHARS_PER_TOKEN = 2  # 中文约 2 字符/token
-    # 模型限制: contextWindow=202752, maxTokens=16384
-    # 安全输入: 202752 - 16384(输出) - 5000(系统提示) - 10000(安全边际) ≈ 171000
-    DEFAULT_MAX_TOKENS = 150000  # 默认最大输入 token
-    DEFAULT_MAX_FILES = 50  # 默认最大文件数
-    DEFAULT_BATCH_SIZE = 15  # 默认每批文件数
-    DEFAULT_OUTPUT_RESERVE = 16384  # 输出预留 token
-    SUPPORTED_EXTENSIONS = [".md", ".txt", ".json", ".yaml", ".yml"]
-    
-    def __init__(self, input_dir: Path, config: dict = None):
-        self.input_dir = input_dir
-        self.config = config or {}
-        
-        # 从配置读取参数
-        context_config = self.config.get("context", {})
-        self.max_tokens = context_config.get("max_input_tokens", self.DEFAULT_MAX_TOKENS)
-        self.max_files = context_config.get("max_file_count", self.DEFAULT_MAX_FILES)
-        self.batch_size = context_config.get("batch_size", self.DEFAULT_BATCH_SIZE)
-    
-    def analyze(self) -> dict:
-        """分析输入目录
-        
-        Returns:
-            dict: 包含文件统计和处理建议
-        """
-        files = list(self._scan_files())
-        
-        total_size = sum(f["size"] for f in files)
-        total_tokens = self._estimate_tokens(total_size)
-        
-        needs_batch = (
-            total_tokens > self.max_tokens or 
-            len(files) > self.max_files
-        )
-        
-        return {
-            "file_count": len(files),
-            "total_size_kb": round(total_size / 1024, 2),
-            "estimated_tokens": total_tokens,
-            "max_tokens": self.max_tokens,
-            "needs_batch": needs_batch,
-            "reason": self._get_batch_reason(files, total_tokens),
-            "files": files
-        }
-    
-    def _scan_files(self) -> iter:
-        """扫描输入文件"""
-        if not self.input_dir.exists():
-            return
-        
-        for f in self.input_dir.rglob("*"):
-            if f.is_file() and f.suffix.lower() in self.SUPPORTED_EXTENSIONS:
-                yield {
-                    "path": str(f),
-                    "size": f.stat().st_size,
-                    "relative": str(f.relative_to(self.input_dir))
-                }
-    
-    def _estimate_tokens(self, size_bytes: int) -> int:
-        """估算 token 数量"""
-        return size_bytes // self.CHARS_PER_TOKEN
-    
-    def _get_batch_reason(self, files: list, total_tokens: int) -> str:
-        """获取需要分批的原因"""
-        reasons = []
-        if total_tokens > self.max_tokens:
-            reasons.append(f"预估 {total_tokens} tokens 超过限制 {self.max_tokens}")
-        if len(files) > self.max_files:
-            reasons.append(f"文件数 {len(files)} 超过限制 {self.max_files}")
-        return "; ".join(reasons) if reasons else "无需分批"
-    
-    def generate_batch_plan(self, analysis: dict) -> List[dict]:
-        """生成分批计划
-        
-        Args:
-            analysis: analyze() 返回的分析结果
-            
-        Returns:
-            List[dict]: 批次计划列表
-        """
-        if not analysis["needs_batch"]:
-            return [{
-                "batch": 1,
-                "files": analysis["files"],
-                "total_batches": 1,
-                "is_full": True
-            }]
-        
-        files = analysis["files"]
-        # 按文件大小排序，大的优先（确保关键文件在前面）
-        files_sorted = sorted(files, key=lambda x: x["size"], reverse=True)
-        
-        batches = []
-        for i in range(0, len(files_sorted), self.batch_size):
-            batch_files = files_sorted[i:i + self.batch_size]
-            batches.append({
-                "batch": i // self.batch_size + 1,
-                "files": batch_files,
-                "total_batches": (len(files_sorted) + self.batch_size - 1) // self.batch_size,
-                "is_full": False
-            })
-        
-        return batches
-
-
-# ==================== 数据类定义 ====================
-
-@dataclass
-class StageConfig:
-    """阶段配置"""
-    name: str
-    phase: str = "custom"
-    input_dir: str = None
-    output_dir: str = None
-    prompt: str = None
-    depends_on: List[str] = field(default_factory=list)
-    skip: bool = False
-    timeout: int = 1800
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> 'StageConfig':
-        """从字典创建"""
-        return cls(
-            name=data.get("name"),
-            phase=data.get("phase", "custom"),
-            input_dir=data.get("input"),
-            output_dir=data.get("output"),
-            prompt=data.get("prompt"),
-            depends_on=data.get("depends_on", []),
-            skip=data.get("skip", False),
-            timeout=data.get("timeout", 1800)
-        )
-
-
-# ==================== 自定义异常 ====================
-
-class WorkflowError(Exception):
-    """工作流基础异常"""
-    pass
-
-
-class StageExecutionError(WorkflowError):
-    """阶段执行异常"""
-    def __init__(self, stage: str, message: str):
-        self.stage = stage
-        self.message = message
-        super().__init__(f"[{stage}] {message}")
-
-
-class StageTimeoutError(WorkflowError):
-    """阶段超时异常"""
-    def __init__(self, stage: str, timeout: int):
-        self.stage = stage
-        self.timeout = timeout
-        super().__init__(f"[{stage}] 执行超时 ({timeout}s)")
-
-
-class DependencyError(WorkflowError):
-    """依赖检查异常"""
-    def __init__(self, stage: str, missing_input: str):
-        self.stage = stage
-        self.missing_input = missing_input
-        super().__init__(f"[{stage}] 缺少前置输入: {missing_input}")
-
-
-# ==================== HTTP 辅助函数 ====================
-
-def http_post(url: str, headers: dict, payload: dict, timeout: int = 30) -> dict:
-    """发送 HTTP POST 请求（优先使用 requests，否则使用 curl）"""
-    if HAS_REQUESTS:
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-            return {"status_code": response.status_code, "text": response.text, "json": response.json() if response.text else None}
-        except Exception as e:
-            return {"error": str(e)}
-    else:
-        # 使用 curl
-        import tempfile
-        header_args = []
-        for k, v in headers.items():
-            header_args.extend(["-H", f"{k}: {v}"])
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(payload, f)
-            payload_file = f.name
-        
-        try:
-            result = subprocess.run(
-                ["curl", "-s", "-X", "POST", url] + header_args + ["-d", f"@{payload_file}", "--connect-timeout", str(timeout)],
-                capture_output=True, text=True, timeout=timeout + 5
-            )
-            response_text = result.stdout
-            try:
-                return {"status_code": 200, "text": response_text, "json": json.loads(response_text) if response_text else None}
-            except:
-                return {"status_code": 500, "text": response_text}
-        except Exception as e:
-            return {"error": str(e)}
-        finally:
-            os.unlink(payload_file)
-
-
-class SubagentExecutor:
-    """子智能体执行器 - 通过 OpenClaw Gateway HTTP API 执行"""
-
-    def __init__(self, gateway_url: str = None, gateway_token: str = None):
-        self.gateway_url = gateway_url or GATEWAY_URL
-        self.gateway_token = gateway_token or GATEWAY_TOKEN
-
-    def spawn(self, task: str, cwd: str, label: str, timeout_seconds: int = 1800) -> dict:
-        """通过 Gateway HTTP API 启动子智能体"""
-        headers = {"Content-Type": "application/json"}
-        if self.gateway_token:
-            headers["Authorization"] = f"Bearer {self.gateway_token}"
-
-        payload = {
-            "tool": "sessions_spawn",
-            "args": {
-                "runtime": "subagent",
-                "mode": "run",
-                "task": task,
-                "cwd": cwd,
-                "timeoutSeconds": timeout_seconds,
-                "label": label
-            }
-        }
-
-        result = http_post(
-            f"{self.gateway_url}/tools/invoke",
-            headers,
-            payload,
-            timeout=30
-        )
-
-        if "error" in result:
-            return {"ok": False, "error": result["error"]}
-        
-        status_code = result.get("status_code", 500)
-        if status_code == 200:
-            return result.get("json", {"ok": True})
-        elif status_code == 404:
-            return {"ok": False, "error": "sessions_spawn 被 Gateway 禁用，请配置 gateway.tools.allow"}
-        else:
-            return {"ok": False, "error": f"HTTP {status_code}: {result.get('text', '')}"}
-
-    def check_status(self, session_key: str) -> dict:
-        """检查子智能体状态"""
-        headers = {"Content-Type": "application/json"}
-        if self.gateway_token:
-            headers["Authorization"] = f"Bearer {self.gateway_token}"
-
-        payload = {
-            "tool": "subagents",
-            "args": {"action": "list"}
-        }
-
-        result = http_post(
-            f"{self.gateway_url}/tools/invoke",
-            headers,
-            payload,
-            timeout=10
-        )
-
-        if "error" in result:
-            return {"running": False, "error": result["error"]}
-        
-        if result.get("status_code") == 200:
-            data = result.get("json", {})
-            if data.get("ok"):
-                # 从 details 中获取 active 和 recent 列表
-                details = data.get("result", {}).get("details", {})
-                if not details:
-                    details = data.get("result", {})
-                
-                for sub in details.get("active", []):
-                    if sub.get("sessionKey") == session_key:
-                        return {"running": True, "info": sub}
-                for sub in details.get("recent", []):
-                    if sub.get("sessionKey") == session_key:
-                        return {"running": False, "info": sub}
-            return {"running": False, "info": None}
-        return {"running": False, "error": result.get("text", "Unknown error")}
-
+# ==================== WorkflowExecutor ====================
 
 class WorkflowExecutor:
     """工作流执行器 - 统一的 PDCA 工作流管理"""
@@ -659,94 +65,63 @@ class WorkflowExecutor:
         self.project_dir = self.base_dir / "projects" / project_name
         self.input_dir = self.project_dir / "input"
         self.output_dir = self.project_dir / "output"
-        self.state_file = self.project_dir / "workflow_state.json"
-        self.log_file = self.project_dir / "logs" / "workflow.jsonl"
         self.config = self._load_config()
         self.running = True
-        self.execute = execute  # 是否实际执行子智能体
+        self.execute = execute
         self.subagent_executor = SubagentExecutor() if execute else None
+        self.state = WorkflowState(self.project_dir)
         
         # 加载阶段配置
         self.stages = self._load_stages(template, stages_override)
         self.stage_map = {s.name: s for s in self.stages}
 
-    # ==================== 配置与状态管理 ====================
-
     def _load_config(self) -> dict:
-        """加载项目配置"""
+        """加载配置"""
         config_path = self.base_dir / "config.yaml"
         default_config = {
-            "pdca": {
-                "max_cycles": 0,  # 0 = 无限循环
-                "cycle_interval_seconds": 300
-            },
-            "execution": {
-                "stage_delay_seconds": 60,
-                "timeout_seconds": 1800
-            }
+            "pdca": {"max_cycles": 0, "cycle_interval_seconds": 60},
+            "execution": {"stage_delay_seconds": 30, "timeout_seconds": 1800}
         }
-
         if not config_path.exists():
             return default_config
-
         try:
             import yaml
             with open(config_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
-                # 合并默认配置
                 for key in default_config:
                     if key not in config:
                         config[key] = default_config[key]
                 return config
         except:
-            # 简单解析 YAML（避免依赖）
             content = config_path.read_text()
             config = default_config.copy()
-
             for key in ["max_cycles", "cycle_interval_seconds"]:
                 match = re.search(rf"{key}:\s*(\d+)", content)
                 if match:
                     config["pdca"][key] = int(match.group(1))
-
             for key in ["stage_delay_seconds", "timeout_seconds"]:
                 match = re.search(rf"{key}:\s*(\d+)", content)
                 if match:
                     config["execution"][key] = int(match.group(1))
-
             return config
 
     def _load_stages(self, template: str = None, stages_override: List[str] = None) -> List[StageConfig]:
-        """加载阶段配置
-        
-        Args:
-            template: 模板名称
-            stages_override: 指定执行的阶段列表
-            
-        Returns:
-            List[StageConfig]: 阶段配置列表
-        """
-        # 优先级: stages_override > template > config.yaml > DEFAULT_STAGES
-        
+        """加载阶段配置"""
         if stages_override:
-            # 使用指定的阶段列表
             return [s for s in self.DEFAULT_STAGES if s.name in stages_override]
         
-        # 尝试从配置加载
         workflow_config = self.config.get("workflow", {})
         
         if template:
-            # 使用指定模板
             templates = workflow_config.get("templates", {})
             template_stages = templates.get(template, {}).get("stages", [])
             if template_stages:
                 return [s for s in self.DEFAULT_STAGES if s.name in template_stages]
         
-        # 使用配置文件中的阶段定义
         stages_config = workflow_config.get("stages", [])
         if stages_config:
             return [StageConfig.from_dict(s) for s in stages_config]
         
-        # 使用默认配置
         return self.DEFAULT_STAGES
 
     def _load_project_info(self) -> dict:
@@ -754,7 +129,6 @@ class WorkflowExecutor:
         project_file = self.project_dir / "project.json"
         if not project_file.exists():
             return {"error": f"项目 '{self.project_name}' 不存在"}
-
         with open(project_file, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -765,70 +139,28 @@ class WorkflowExecutor:
             return prompt_path.read_text(encoding="utf-8")
         return f"你是 {stage} 智能体，请完成你的任务。"
 
-    def _read_state(self) -> dict:
-        """读取工作流状态"""
-        if self.state_file.exists():
-            try:
-                return json.loads(self.state_file.read_text(encoding="utf-8"))
-            except:
-                pass
-        return {
-            "cycle": 0,
-            "current_phase": None,
-            "current_stage": None,
-            "paused": False,
-            "history": []
-        }
-
-    def _save_state(self, state: dict):
-        """保存工作流状态"""
-        state["updated_at"] = datetime.now().isoformat()
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.state_file.write_text(
-            json.dumps(state, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
-
-    def _log_execution(self, phase: str, stage: str, spawn_config: dict):
-        """记录执行日志"""
-        self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "cycle": self._read_state().get("cycle", 0),
-            "phase": phase,
-            "stage": stage,
-            "spawn_config": spawn_config
-        }
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-
     # ==================== 阶段管理 ====================
 
     def _get_next_stage(self, state: dict) -> Tuple[Optional[str], Optional[str]]:
         """获取下一阶段"""
         current_stage = state.get("current_stage")
-
         if current_stage is None:
-            # 开始第一个阶段
             state["cycle"] = state.get("cycle", 0) + 1
             if self.stages:
                 first_stage = self.stages[0]
                 return first_stage.phase, first_stage.name
             return None, None
 
-        # 找到当前阶段索引
         stage_names = [s.name for s in self.stages]
         if current_stage not in stage_names:
             return None, None
         
         stage_idx = stage_names.index(current_stage)
         
-        # 下一阶段
         if stage_idx + 1 < len(self.stages):
             next_stage = self.stages[stage_idx + 1]
             return next_stage.phase, next_stage.name
 
-        # 循环完成
         state["history"].append({
             "cycle": state["cycle"],
             "completed_at": datetime.now().isoformat()
@@ -844,16 +176,9 @@ class WorkflowExecutor:
         return None, None
 
     def _generate_spawn_config(self, stage: str, phase: str = None, batch_info: dict = None) -> dict:
-        """生成 sessions_spawn 配置
-        
-        Args:
-            stage: 阶段名称
-            phase: PDCA 阶段
-            batch_info: 分批信息（可选）
-        """
+        """生成 sessions_spawn 配置"""
         stage_config = self.stage_map.get(stage)
         
-        # 从阶段配置获取属性
         if stage_config:
             input_path = self.project_dir / stage_config.input_dir if stage_config.input_dir else self.input_dir
             output_path = self.project_dir / stage_config.output_dir if stage_config.output_dir else self.output_dir / stage
@@ -866,7 +191,6 @@ class WorkflowExecutor:
         
         prompt = self._load_prompt(stage)
         
-        # 生成分批任务描述
         if batch_info and not batch_info.get("is_full"):
             file_list = "\n".join(f"  - {f['relative']} ({f['size']} bytes)" for f in batch_info["files"])
             batch_context = f"""
@@ -923,11 +247,7 @@ class WorkflowExecutor:
     # ==================== 执行模式 ====================
 
     def _check_dependencies(self, stage: str) -> Tuple[bool, Optional[str]]:
-        """检查前置阶段输出是否存在
-        
-        Returns:
-            Tuple[bool, Optional[str]]: (是否通过, 缺失的输入路径)
-        """
+        """检查前置阶段输出是否存在"""
         stage_config = self.stage_map.get(stage)
         if not stage_config:
             return True, None
@@ -940,7 +260,6 @@ class WorkflowExecutor:
         if not full_path.exists():
             return False, str(full_path)
         
-        # 检查目录是否为空（requirement 阶段除外）
         if stage != "requirement" and full_path.is_dir():
             if not any(full_path.iterdir()):
                 return False, f"{full_path} (目录为空)"
@@ -949,23 +268,7 @@ class WorkflowExecutor:
 
     def execute_stage(self, stage: str, phase: str = None, wait: bool = True, 
                       skip_dependency_check: bool = False) -> dict:
-        """执行单个阶段
-
-        Args:
-            stage: 阶段名称
-            phase: PDCA 阶段
-            wait: 是否等待子智能体完成（仅当 execute=True 时有效）
-            skip_dependency_check: 是否跳过依赖检查
-
-        Returns:
-            dict: 执行结果
-            
-        Raises:
-            DependencyError: 前置阶段输出不存在
-            StageExecutionError: 子智能体启动失败
-            StageTimeoutError: 子智能体执行超时
-        """
-        # 获取阶段配置
+        """执行单个阶段"""
         stage_config = self.stage_map.get(stage)
         if not stage_config:
             stage_config = StageConfig(stage, phase or "custom")
@@ -973,19 +276,17 @@ class WorkflowExecutor:
         if phase is None:
             phase = stage_config.phase
 
-        # 依赖检查
         if self.execute and not skip_dependency_check:
             passed, missing = self._check_dependencies(stage)
             if not passed:
                 raise DependencyError(stage, missing)
         
         # 检查是否有子任务定义
-        subtasks = STAGE_SUBTASKS.get(stage, [])
+        subtask_executor = SubtaskExecutor(stage, self.output_dir / stage, self.base_dir)
         output_path = self.project_dir / (stage_config.output_dir or f"output/{stage}")
         
-        if subtasks and self.execute:
-            # 有子任务定义，使用增量执行
-            return self._execute_stage_subtasks(stage, phase, subtasks, output_path, wait)
+        if subtask_executor.has_subtasks() and self.execute:
+            return self._execute_stage_subtasks(stage, phase, subtask_executor, output_path, wait)
         
         # 分析输入，决定是否分批
         input_path = self.project_dir / (stage_config.input_dir or "input/")
@@ -994,195 +295,9 @@ class WorkflowExecutor:
             analysis = analyzer.analyze()
             
             if analysis["needs_batch"] and stage in ["requirement", "design", "development"]:
-                # 需要分批执行
                 return self._execute_stage_batch(stage, phase, analysis, analyzer, wait)
         
-        # 直接执行（单批次）
         return self._execute_stage_single(stage, phase, wait)
-    
-    def _execute_stage_subtasks(self, stage: str, phase: str, subtasks: List[dict],
-                                  output_dir: Path, wait: bool = True) -> dict:
-        """使用子任务增量执行阶段
-        
-        Args:
-            stage: 阶段名称
-            phase: PDCA 阶段
-            subtasks: 子任务列表
-            output_dir: 输出目录
-            wait: 是否等待每批完成
-            
-        Returns:
-            dict: 执行结果
-        """
-        print(f"\n{'='*60}")
-        print(f"📦 阶段 {stage} 使用子任务增量执行")
-        print(f"   子任务数: {len(subtasks)}")
-        print(f"{'='*60}")
-        
-        # 创建子任务执行器
-        executor = SubtaskExecutor(stage, output_dir, self.base_dir)
-        execution_plan = executor.get_execution_plan()
-        
-        start_time = time.time()
-        subtask_results = []
-        
-        for i, subtask in enumerate(execution_plan):
-            subtask_name = subtask["name"]
-            print(f"\n{'─'*40}")
-            print(f"[{i+1}/{len(execution_plan)}] 子任务: {subtask_name}")
-            print(f"   描述: {subtask['description']}")
-            
-            try:
-                # 生成子任务提示词
-                task_prompt = executor.generate_subtask_prompt(
-                    subtask, 
-                    {"output_dir": output_dir}
-                )
-                
-                # 执行子任务
-                result = self._execute_subtask(
-                    stage, phase, subtask_name, task_prompt, output_dir, wait
-                )
-                
-                # 检查子任务完成状态
-                if result.get("success"):
-                    new_files = result.get("output_files", [])
-                    print(f"   ✅ 子任务完成，生成 {len(new_files)} 个文件")
-                    executor.record_result(subtask_name, {
-                        "success": True,
-                        "output_files": new_files,
-                        "output_dir": result.get("output_dir"),
-                        "summary": subtask["description"]
-                    })
-                else:
-                    print(f"   ⚠️ 子任务可能不完整: {result.get('error', '未知')}")
-                    executor.record_result(subtask_name, {
-                        "success": False,
-                        "error": result.get("error"),
-                        "summary": subtask["description"]
-                    })
-                
-                subtask_results.append({
-                    "subtask": subtask_name,
-                    "success": result.get("success", False),
-                    "duration": result.get("duration", 0)
-                })
-                
-                # 子任务间短暂延迟
-                if i < len(execution_plan) - 1:
-                    delay = 5  # 子任务间延迟 5 秒
-                    time.sleep(delay)
-                    
-            except Exception as e:
-                print(f"   ❌ 子任务失败: {e}")
-                subtask_results.append({
-                    "subtask": subtask_name,
-                    "success": False,
-                    "error": str(e)
-                })
-                # 继续执行其他子任务
-                continue
-        
-        # 汇总结果
-        total_duration = time.time() - start_time
-        success_count = sum(1 for r in subtask_results if r.get("success"))
-        
-        print(f"\n{'='*60}")
-        print(f"📊 阶段 {stage} 子任务执行完成")
-        print(f"   成功: {success_count}/{len(subtasks)}")
-        print(f"   耗时: {total_duration:.1f}s")
-        print(f"{'='*60}")
-        
-        return {
-            "stage": stage,
-            "phase": phase,
-            "subtask_mode": True,
-            "total_subtasks": len(subtasks),
-            "success_subtasks": success_count,
-            "failed_subtasks": len(subtasks) - success_count,
-            "duration": total_duration,
-            "success": success_count == len(subtasks),
-            "subtask_results": subtask_results,
-            "summary": executor.get_summary()
-        }
-    
-    def _execute_subtask(self, stage: str, phase: str, subtask_name: str, 
-                          task_prompt: str, output_dir: Path, wait: bool = True) -> dict:
-        """执行单个子任务"""
-        stage_config = self.stage_map.get(stage) or StageConfig(stage, phase or "custom")
-        timeout = stage_config.timeout if stage_config.timeout else 1800
-        
-        label = f"{self.project_name}_{phase}_{stage}_{subtask_name}"
-        
-        # 记录执行前的文件列表
-        existing_files = set()
-        if output_dir.exists():
-            existing_files = {str(f) for f in output_dir.rglob("*") if f.is_file()}
-        
-        spawn_config = {
-            "action": "sessions_spawn",
-            "params": {
-                "runtime": "subagent",
-                "mode": "run",
-                "task": task_prompt,
-                "cwd": str(self.base_dir),
-                "timeoutSeconds": timeout,
-                "label": label
-            },
-            "stage": stage,
-            "phase": phase,
-            "subtask": subtask_name
-        }
-        
-        start_time = time.time()
-        
-        if self.execute and self.subagent_executor:
-            result = self.subagent_executor.spawn(
-                task=task_prompt,
-                cwd=str(self.base_dir),
-                label=label,
-                timeout_seconds=timeout
-            )
-            
-            if not result.get("ok"):
-                error_msg = result.get("error", "未知错误")
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "duration": time.time() - start_time
-                }
-            
-            spawn_config["spawn_result"] = result
-            
-            if wait:
-                result_data = result.get("result", {})
-                if "details" in result_data:
-                    session_key = result_data["details"].get("childSessionKey")
-                else:
-                    session_key = result_data.get("childSessionKey")
-                    
-                if session_key:
-                    completed = self._wait_for_completion(session_key)
-                    if not completed:
-                        return {
-                            "success": False,
-                            "error": "超时",
-                            "duration": time.time() - start_time
-                        }
-        
-        # 扫描新生成的文件（增量输出）
-        new_files = []
-        if output_dir.exists():
-            current_files = {str(f) for f in output_dir.rglob("*") if f.is_file()}
-            new_files = [str(f) for f in (current_files - existing_files)]
-        
-        return {
-            "success": True,
-            "duration": time.time() - start_time,
-            "output_dir": str(output_dir),
-            "output_files": new_files,  # 新增：本次生成的文件列表
-            "total_files": len(new_files)
-        }
     
     def _execute_stage_single(self, stage: str, phase: str, wait: bool = True,
                                batch_info: dict = None) -> dict:
@@ -1204,9 +319,8 @@ class WorkflowExecutor:
         print(f"  输出: {spawn_config['output_dir']}")
         print(f"{'='*60}")
 
-        self._log_execution(phase, stage, spawn_config)
+        self.state.log(phase, stage, spawn_config)
 
-        # 实际执行子智能体
         if self.execute and self.subagent_executor:
             print(f"\n🚀 启动子智能体: {spawn_config['params']['label']}")
 
@@ -1228,7 +342,6 @@ class WorkflowExecutor:
             spawn_config["spawn_result"] = result
 
             if wait:
-                # 等待子智能体完成
                 result_data = result.get("result", {})
                 if "details" in result_data:
                     session_key = result_data["details"].get("childSessionKey")
@@ -1248,19 +361,8 @@ class WorkflowExecutor:
         return spawn_config
     
     def _execute_stage_batch(self, stage: str, phase: str, analysis: dict,
-                              analyzer: 'InputAnalyzer', wait: bool = True) -> dict:
-        """执行分批处理
-        
-        Args:
-            stage: 阶段名称
-            phase: PDCA 阶段
-            analysis: 输入分析结果
-            analyzer: 输入分析器
-            wait: 是否等待每批完成
-            
-        Returns:
-            dict: 汇总执行结果
-        """
+                              analyzer: InputAnalyzer, wait: bool = True) -> dict:
+        """执行分批处理"""
         batches = analyzer.generate_batch_plan(analysis)
         
         print(f"\n{'='*60}")
@@ -1280,7 +382,6 @@ class WorkflowExecutor:
                 result = self._execute_stage_single(stage, phase, wait, batch)
                 batch_results.append(result)
                 
-                # 批次间短暂延迟
                 if batch["batch"] < batch["total_batches"]:
                     delay = self.config["execution"].get("stage_delay_seconds", 30)
                     print(f"\n⏳ 等待 {delay}s 后处理下一批...")
@@ -1293,10 +394,8 @@ class WorkflowExecutor:
                     "success": False,
                     "error": str(e)
                 })
-                # 分批模式下继续执行其他批次
                 continue
         
-        # 汇总结果
         total_duration = time.time() - start_time
         success_count = sum(1 for r in batch_results if r.get("success"))
         
@@ -1316,15 +415,153 @@ class WorkflowExecutor:
                 "estimated_tokens": analysis["estimated_tokens"]
             }
         }
-
+    
+    def _execute_stage_subtasks(self, stage: str, phase: str, 
+                                  subtask_executor: SubtaskExecutor,
+                                  output_dir: Path, wait: bool = True) -> dict:
+        """使用子任务增量执行阶段"""
+        execution_plan = subtask_executor.get_execution_plan()
+        
+        print(f"\n{'='*60}")
+        print(f"📦 阶段 {stage} 使用子任务增量执行")
+        print(f"   子任务数: {len(execution_plan)}")
+        print(f"{'='*60}")
+        
+        start_time = time.time()
+        subtask_results = []
+        
+        for i, subtask in enumerate(execution_plan):
+            subtask_name = subtask["name"]
+            print(f"\n{'─'*40}")
+            print(f"[{i+1}/{len(execution_plan)}] 子任务: {subtask_name}")
+            print(f"   描述: {subtask['description']}")
+            
+            try:
+                task_prompt = subtask_executor.generate_subtask_prompt(
+                    subtask, {"output_dir": output_dir}
+                )
+                
+                result = self._execute_subtask(
+                    stage, phase, subtask_name, task_prompt, output_dir, wait
+                )
+                
+                if result.get("success"):
+                    new_files = result.get("output_files", [])
+                    print(f"   ✅ 子任务完成，生成 {len(new_files)} 个文件")
+                    subtask_executor.record_result(subtask_name, {
+                        "success": True,
+                        "output_files": new_files,
+                        "output_dir": result.get("output_dir"),
+                        "summary": subtask["description"]
+                    })
+                else:
+                    print(f"   ⚠️ 子任务可能不完整: {result.get('error', '未知')}")
+                    subtask_executor.record_result(subtask_name, {
+                        "success": False,
+                        "error": result.get("error"),
+                        "summary": subtask["description"]
+                    })
+                
+                subtask_results.append({
+                    "subtask": subtask_name,
+                    "success": result.get("success", False),
+                    "duration": result.get("duration", 0)
+                })
+                
+                if i < len(execution_plan) - 1:
+                    time.sleep(5)
+                    
+            except Exception as e:
+                print(f"   ❌ 子任务失败: {e}")
+                subtask_results.append({
+                    "subtask": subtask_name,
+                    "success": False,
+                    "error": str(e)
+                })
+                continue
+        
+        total_duration = time.time() - start_time
+        success_count = sum(1 for r in subtask_results if r.get("success"))
+        
+        print(f"\n{'='*60}")
+        print(f"📊 阶段 {stage} 子任务执行完成")
+        print(f"   成功: {success_count}/{len(execution_plan)}")
+        print(f"   耗时: {total_duration:.1f}s")
+        print(f"{'='*60}")
+        
+        return {
+            "stage": stage,
+            "phase": phase,
+            "subtask_mode": True,
+            "total_subtasks": len(execution_plan),
+            "success_subtasks": success_count,
+            "failed_subtasks": len(execution_plan) - success_count,
+            "duration": total_duration,
+            "success": success_count == len(execution_plan),
+            "subtask_results": subtask_results,
+            "summary": subtask_executor.get_summary()
+        }
+    
+    def _execute_subtask(self, stage: str, phase: str, subtask_name: str, 
+                          task_prompt: str, output_dir: Path, wait: bool = True) -> dict:
+        """执行单个子任务"""
+        stage_config = self.stage_map.get(stage) or StageConfig(stage, phase or "custom")
+        timeout = stage_config.timeout if stage_config.timeout else 1800
+        
+        label = f"{self.project_name}_{phase}_{stage}_{subtask_name}"
+        
+        existing_files = set()
+        if output_dir.exists():
+            existing_files = {str(f) for f in output_dir.rglob("*") if f.is_file()}
+        
+        start_time = time.time()
+        
+        if self.execute and self.subagent_executor:
+            result = self.subagent_executor.spawn(
+                task=task_prompt,
+                cwd=str(self.base_dir),
+                label=label,
+                timeout_seconds=timeout
+            )
+            
+            if not result.get("ok"):
+                return {
+                    "success": False,
+                    "error": result.get("error", "未知错误"),
+                    "duration": time.time() - start_time
+                }
+            
+            if wait:
+                result_data = result.get("result", {})
+                if "details" in result_data:
+                    session_key = result_data["details"].get("childSessionKey")
+                else:
+                    session_key = result_data.get("childSessionKey")
+                    
+                if session_key:
+                    completed = self._wait_for_completion(session_key)
+                    if not completed:
+                        return {
+                            "success": False,
+                            "error": "超时",
+                            "duration": time.time() - start_time
+                        }
+        
+        new_files = []
+        if output_dir.exists():
+            current_files = {str(f) for f in output_dir.rglob("*") if f.is_file()}
+            new_files = [str(f) for f in (current_files - existing_files)]
+        
+        return {
+            "success": True,
+            "duration": time.time() - start_time,
+            "output_dir": str(output_dir),
+            "output_files": new_files,
+            "total_files": len(new_files)
+        }
+    
     def _wait_for_completion(self, session_key: str, poll_interval: int = 10, max_wait: int = 3600):
-        """等待子智能体完成
-
-        Args:
-            session_key: 子智能体会话 key
-            poll_interval: 轮询间隔（秒），默认 10 秒
-            max_wait: 最大等待时间（秒），默认 1 小时
-        """
+        """等待子智能体完成"""
         waited = 0
         while waited < max_wait:
             status = self.subagent_executor.check_status(session_key)
@@ -1340,24 +577,24 @@ class WorkflowExecutor:
         return False
 
     def execute_next(self) -> Optional[dict]:
-        """执行下一阶段（PDCA 模式）"""
-        state = self._read_state()
-
+        """执行下一阶段"""
+        state = self.state.read()
         if state.get("paused"):
-            print("⏸️ 工作流已暂停")
+            print("工作流已暂停")
             return None
 
         phase, stage = self._get_next_stage(state)
-
-        if phase is None:
-            print("✅ PDCA 循环已完成，已达最大循环次数")
+        if not stage:
+            print("工作流已完成")
             return None
 
-        state["current_phase"] = phase
-        state["current_stage"] = stage
-        self._save_state(state)
-
-        return self.execute_stage(stage, phase)
+        try:
+            result = self.execute_stage(stage, phase)
+            self.state.update_stage(phase, stage)
+            return result
+        except WorkflowError as e:
+            print(f"执行失败: {e}")
+            return None
 
     def execute_stages(self, stages: List[str]) -> List[dict]:
         """执行指定阶段列表"""
@@ -1377,25 +614,8 @@ class WorkflowExecutor:
         return results
 
     def execute_full_cycle(self) -> dict:
-        """执行完整工作流
-        
-        Returns:
-            dict: 执行结果统计，包含:
-                - total: 总阶段数
-                - success: 成功数
-                - failed: 失败数
-                - duration: 总耗时（秒）
-                - stages: 各阶段结果
-                - error: 失败阶段错误信息（如有）
-        """
-        # 重置状态
-        self._save_state({
-            "cycle": 1,
-            "current_phase": None,
-            "current_stage": None,
-            "paused": False,
-            "history": []
-        })
+        """执行完整工作流"""
+        self.state.reset()
 
         stats = {
             "total": 0,
@@ -1408,7 +628,6 @@ class WorkflowExecutor:
         }
         start_time = time.time()
         
-        # 显示执行计划
         print(f"\n🔄 执行工作流 ({len(self.stages)} 个阶段)")
         phase_groups = {}
         for s in self.stages:
@@ -1424,7 +643,6 @@ class WorkflowExecutor:
                 phase = stage_config.phase
                 stats["total"] += 1
                 
-                # 跳过标记的阶段
                 if stage_config.skip:
                     print(f"⏭️ 跳过阶段: {stage}")
                     stats["skipped"] += 1
@@ -1435,21 +653,13 @@ class WorkflowExecutor:
                     result["phase"] = phase
                     stats["stages"].append(result)
                     stats["success"] += 1
-                    
-                    # 更新状态
-                    state = self._read_state()
-                    state["current_phase"] = phase
-                    state["current_stage"] = stage
-                    self._save_state(state)
+                    self.state.update_stage(phase, stage)
                     
                 except DependencyError as e:
                     print(f"⚠️ 依赖检查失败: {e}")
                     stats["stages"].append({
-                        "stage": stage,
-                        "phase": phase,
-                        "success": False,
-                        "error": str(e),
-                        "error_type": "dependency"
+                        "stage": stage, "phase": phase,
+                        "success": False, "error": str(e), "error_type": "dependency"
                     })
                     stats["failed"] += 1
                     stats["error"] = str(e)
@@ -1458,11 +668,8 @@ class WorkflowExecutor:
                 except StageExecutionError as e:
                     print(f"❌ 阶段执行失败: {e}")
                     stats["stages"].append({
-                        "stage": stage,
-                        "phase": phase,
-                        "success": False,
-                        "error": str(e),
-                        "error_type": "execution"
+                        "stage": stage, "phase": phase,
+                        "success": False, "error": str(e), "error_type": "execution"
                     })
                     stats["failed"] += 1
                     stats["error"] = str(e)
@@ -1471,39 +678,22 @@ class WorkflowExecutor:
                 except StageTimeoutError as e:
                     print(f"⏰ 阶段执行超时: {e}")
                     stats["stages"].append({
-                        "stage": stage,
-                        "phase": phase,
-                        "success": False,
-                        "error": str(e),
-                        "error_type": "timeout"
+                        "stage": stage, "phase": phase,
+                        "success": False, "error": str(e), "error_type": "timeout"
                     })
                     stats["failed"] += 1
                     stats["error"] = str(e)
                     raise
 
         except WorkflowError:
-            # 工作流错误已记录，继续返回统计
             pass
 
-        # 标记完成
         stats["duration"] = time.time() - start_time
         
-        state = self._read_state()
         if stats["failed"] == 0:
-            state["history"].append({
-                "cycle": state["cycle"],
-                "completed_at": datetime.now().isoformat(),
-                "duration": stats["duration"]
-            })
-            self._save_state(state)
+            self.state.record_cycle_complete()
             print(f"\n✅ PDCA 循环完成")
         else:
-            state["history"].append({
-                "cycle": state["cycle"],
-                "failed_at": datetime.now().isoformat(),
-                "error": stats["error"]
-            })
-            self._save_state(state)
             print(f"\n❌ PDCA 循环中断: {stats['error']}")
 
         print(f"   总计: {stats['total']} 阶段")
@@ -1514,97 +704,43 @@ class WorkflowExecutor:
         return stats
 
     def run_continuous(self):
-        """持续运行（自动循环执行）"""
-        print(f"\n{'='*60}")
-        print(f"🚀 工作流自动执行器启动")
-        print(f"📁 项目: {self.project_name}")
-        print(f"📂 目录: {self.project_dir}")
-        print(f"{'='*60}\n")
-
-        project_info = self._load_project_info()
-        if "error" in project_info:
-            print(f"❌ {project_info['error']}")
-            return
-
-        print(f"🎯 目标: {project_info.get('goal', '未指定')}")
-
-        stage_delay = self.config["execution"].get("stage_delay_seconds", 60)
-
+        """持续执行工作流"""
+        print(f"\n🔄 开始持续执行工作流")
+        cycle = 0
         while self.running:
-            try:
-                state = self._read_state()
-
-                if state.get("paused"):
-                    print("⏸️ 已暂停，等待恢复...")
-                    time.sleep(10)
-                    continue
-
-                result = self.execute_next()
-
-                if result is None:
-                    print("\n👋 工作流执行完成")
-                    break
-
-                print(f"\n⏳ 等待 {stage_delay} 秒后继续...")
-                time.sleep(stage_delay)
-
-            except KeyboardInterrupt:
-                print("\n⏸️ 收到中断信号，停止执行")
-                self.running = False
+            cycle += 1
+            print(f"\n{'='*60}")
+            print(f"第 {cycle} 轮 PDCA 循环")
+            print(f"{'='*60}")
+            
+            self.execute_full_cycle()
+            
+            interval = self.config["pdca"].get("cycle_interval_seconds", 60)
+            max_cycles = self.config["pdca"].get("max_cycles", 0)
+            
+            if max_cycles > 0 and cycle >= max_cycles:
+                print(f"\n达到最大循环次数 {max_cycles}，停止")
                 break
-            except Exception as e:
-                print(f"❌ 错误: {e}")
-                time.sleep(60)
-
-        print("\n👋 执行器已停止")
-
-    # ==================== 控制命令 ====================
-
-    def pause(self):
-        """暂停工作流"""
-        state = self._read_state()
-        state["paused"] = True
-        self._save_state(state)
-        print("⏸️ 工作流已暂停")
-
-    def resume(self):
-        """恢复工作流"""
-        state = self._read_state()
-        state["paused"] = False
-        self._save_state(state)
-        print("▶️ 工作流已恢复")
-
-    def reset(self):
-        """重置工作流状态"""
-        self._save_state({
-            "cycle": 0,
-            "current_phase": None,
-            "current_stage": None,
-            "paused": False,
-            "history": []
-        })
-        print("🔄 工作流状态已重置")
+            
+            print(f"\n⏳ 等待 {interval} 秒后开始下一轮...")
+            time.sleep(interval)
 
     def status(self) -> dict:
-        """获取工作流状态"""
-        state = self._read_state()
+        """获取状态"""
         project_info = self._load_project_info()
-
         return {
             "project": self.project_name,
             "project_dir": str(self.project_dir),
-            "goal": project_info.get("goal") if "error" not in project_info else None,
-            "cycle": state.get("cycle", 0),
-            "current_phase": state.get("current_phase"),
-            "current_stage": state.get("current_stage"),
-            "paused": state.get("paused", False),
-            "history_count": len(state.get("history", [])),
+            "goal": project_info.get("goal", "未设置"),
+            **self.state.get_status(),
             "config": {
                 "max_cycles": self.config["pdca"].get("max_cycles", 0),
-                "stage_delay": self.config["execution"].get("stage_delay_seconds", 60)
+                "stage_delay": self.config["execution"].get("stage_delay_seconds", 30)
             }
         }
 
+
+# ==================== 入口 ====================
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1615,33 +751,23 @@ def main():
   # 查看状态
   python3 scripts/workflow.py -p my_project --status
 
-  # 单步执行（仅生成配置）
-  python3 scripts/workflow.py -p my_project --next
-
-  # 单步执行（实际运行子智能体）
+  # 单步执行
   python3 scripts/workflow.py -p my_project --next --execute
 
-  # 指定阶段执行
+  # 指定阶段
   python3 scripts/workflow.py -p my_project --stages requirement,design --execute
 
-  # 使用模板执行
+  # 使用模板
   python3 scripts/workflow.py -p my_project --template dev-only --execute
 
-  # 从指定阶段开始执行
+  # 从指定阶段开始
   python3 scripts/workflow.py -p my_project --from development --execute
 
   # 执行到指定阶段
   python3 scripts/workflow.py -p my_project --until testing --execute
 
-  # 完整循环（实际执行）
+  # 完整循环
   python3 scripts/workflow.py -p my_project --full-cycle --execute
-
-  # 持续执行
-  python3 scripts/workflow.py -p my_project --start --execute
-
-  # 暂停/恢复
-  python3 scripts/workflow.py -p my_project --pause
-  python3 scripts/workflow.py -p my_project --resume
         """
     )
 
@@ -1649,27 +775,23 @@ def main():
     parser.add_argument("--status", "-s", action="store_true", help="查看状态")
     parser.add_argument("--next", "-n", action="store_true", help="执行下一阶段")
     parser.add_argument("--stages", help="执行指定阶段（逗号分隔）")
-    parser.add_argument("--template", "-t", help="使用预设模板 (full-pdca/dev-only/test-only/plan-do)")
-    parser.add_argument("--from", dest="from_stage", help="从指定阶段开始执行")
-    parser.add_argument("--until", dest="until_stage", help="执行到指定阶段为止")
+    parser.add_argument("--template", "-t", help="使用预设模板")
+    parser.add_argument("--from", dest="from_stage", help="从指定阶段开始")
+    parser.add_argument("--until", dest="until_stage", help="执行到指定阶段")
     parser.add_argument("--full-cycle", "-f", action="store_true", help="执行完整工作流")
-    parser.add_argument("--start", action="store_true", help="启动持续自动执行")
-    parser.add_argument("--pause", action="store_true", help="暂停工作流")
-    parser.add_argument("--resume", action="store_true", help="恢复工作流")
+    parser.add_argument("--start", action="store_true", help="启动持续执行")
+    parser.add_argument("--pause", action="store_true", help="暂停")
+    parser.add_argument("--resume", action="store_true", help="恢复")
     parser.add_argument("--reset", action="store_true", help="重置状态")
-    parser.add_argument("--execute", "-e", action="store_true",
-                        help="实际执行子智能体（通过 Gateway HTTP API）")
-    parser.add_argument("--gateway-url", default="http://127.0.0.1:18799",
-                        help="Gateway URL (默认: http://127.0.0.1:18799)")
+    parser.add_argument("--execute", "-e", action="store_true", help="实际执行子智能体")
+    parser.add_argument("--gateway-url", default="http://127.0.0.1:18799", help="Gateway URL")
 
     args = parser.parse_args()
 
-    # 处理阶段范围
     stages_override = None
     if args.stages:
         stages_override = [s.strip() for s in args.stages.split(",")]
     elif args.from_stage or args.until_stage:
-        # 获取默认阶段列表
         default_stages = [s.name for s in WorkflowExecutor.DEFAULT_STAGES]
         from_idx = 0
         until_idx = len(default_stages)
@@ -1696,44 +818,45 @@ def main():
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif args.pause:
-        executor.pause()
+        executor.state.pause()
+        print("已暂停")
 
     elif args.resume:
-        executor.resume()
+        executor.state.resume()
+        print("已恢复")
 
     elif args.reset:
-        executor.reset()
+        executor.state.reset()
+        print("已重置")
 
     elif args.stages or args.from_stage or args.until_stage:
-        stages = stages_override
-        results = executor.execute_stages(stages)
+        results = executor.execute_stages(stages_override)
         if not args.execute:
-            print(f"\n📋 执行结果（仅配置，使用 --execute 实际执行）:")
+            print(f"\n📋 执行结果（使用 --execute 实际执行）:")
             for r in results:
-                print(f"  - [{r['phase'].upper()}] {r['stage']}")
+                print(f"  - [{r.get('phase', '').upper()}] {r.get('stage')}")
 
     elif args.full_cycle:
         stats = executor.execute_full_cycle()
         if not args.execute:
-            print(f"\n📋 生成的任务配置（使用 --execute 实际执行）:")
+            print(f"\n📋 任务配置（使用 --execute 实际执行）:")
             print(json.dumps([s.get("params") for s in stats.get("stages", []) if s.get("params")], 
                            indent=2, ensure_ascii=False))
 
     elif args.next:
         result = executor.execute_next()
         if result and not args.execute:
-            print(f"\n📋 sessions_spawn 配置（使用 --execute 实际执行）:")
-            print(json.dumps(result["params"], indent=2, ensure_ascii=False))
+            print(f"\n📋 配置（使用 --execute 实际执行）:")
+            print(json.dumps(result.get("params"), indent=2, ensure_ascii=False))
 
     elif args.start:
         executor.run_continuous()
 
     else:
-        # 默认显示状态
         result = executor.status()
         result["stages"] = [s.name for s in executor.stages]
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
-    exit(main())
+    main()
