@@ -23,6 +23,12 @@ class TicketDeduplicator:
     """工单去重器"""
     
     def __init__(self, project_name: str, base_dir: str = None):
+        """初始化工单去重器。
+
+        Args:
+            project_name: 项目名称。
+            base_dir: 基础目录，默认为脚本所在目录的父目录。
+        """
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
         self.tickets_dir = self.base_dir / "projects" / project_name / "input" / "tickets"
@@ -152,7 +158,7 @@ class TicketDeduplicator:
         
         return duplicate_groups
     
-    def generate_report(self, tickets: List[Dict], duplicates: List[Dict]) -> str:
+    def generate_dedup_report(self, tickets: List[Dict], duplicates: List[Dict]) -> str:
         """生成去重报告"""
         report = f"""# 工单去重报告
 
@@ -229,7 +235,7 @@ class TicketDeduplicator:
         duplicates = self.find_duplicates(tickets, threshold)
         
         # 生成报告
-        report = self.generate_report(tickets, duplicates)
+        report = self.generate_dedup_report(tickets, duplicates)
         
         # 保存报告
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -247,6 +253,7 @@ class TicketDeduplicator:
 
 
 def main():
+    """命令行入口，解析参数并执行工单去重分析。"""
     parser = argparse.ArgumentParser(description="工单去重工具")
     parser.add_argument("--project", "-p", required=True, help="项目名称")
     parser.add_argument("--threshold", "-t", type=float, default=0.5, help="相似度阈值 (0-1)")

@@ -19,10 +19,17 @@ manifest.json 结构：
 """
 
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
 from threading import Lock
+
+
+from .revision_history import version_sort_key
+
+
+logger = logging.getLogger(__name__)
 
 
 class ManifestManager:
@@ -42,7 +49,7 @@ class ManifestManager:
             try:
                 return json.loads(self.manifest_file.read_text(encoding="utf-8"))
             except Exception as e:
-                print(f"⚠️ 加载 manifest 失败: {e}")
+                logger.warning("加载 manifest 失败: %s", e)
         
         return {
             "project": self.project_dir.name,
@@ -97,9 +104,7 @@ class ManifestManager:
         if version not in manifest["processed_versions"]:
             manifest["processed_versions"].append(version)
             # 排序
-            manifest["processed_versions"].sort(
-                key=lambda v: self._version_sort_key(v)
-            )
+            manifest["processed_versions"].sort(key=version_sort_key)
         
         # 更新最后处理版本
         manifest["last_processed_version"] = version
@@ -135,7 +140,7 @@ class ManifestManager:
         """
         processed = set(self.get_processed_versions())
         pending = [v for v in all_versions if v not in processed]
-        pending.sort(key=self._version_sort_key)
+        pending.sort(key=version_sort_key)
         return pending
     
     # ========== 重置 ==========
@@ -149,7 +154,7 @@ class ManifestManager:
             "versions": {},
             "reset_at": datetime.now().isoformat()
         })
-        print("✅ 版本清单已重置")
+        logger.info("版本清单已重置")
     
     def reset_to_version(self, version: str):
         """重置到指定版本（删除该版本之后的记录）"""
@@ -169,9 +174,9 @@ class ManifestManager:
             manifest["last_processed_version"] = processed[idx-1] if idx > 0 else None
             
             self._save(manifest)
-            print(f"✅ 已重置到版本 {version} 之前")
+            logger.info("已重置到版本 %s 之前", version)
         else:
-            print(f"⚠️ 版本 {version} 未找到")
+            logger.warning("版本 %s 未找到", version)
     
     # ========== 统计 ==========
     
@@ -191,35 +196,23 @@ class ManifestManager:
     
     # ========== 辅助方法 ==========
     
-    @staticmethod
-    def _version_sort_key(version: str) -> tuple:
-        """版本号排序键"""
-        if not version.startswith('v'):
-            return (0, 0)
-        
-        try:
-            parts = version[1:].split('.')
-            return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-        except (ValueError, IndexError):
-            return (0, 0)
-    
     def print_status(self):
         """打印状态"""
         manifest = self._load()
         
-        print("\n" + "=" * 60)
-        print("📊 版本清单状态")
-        print("=" * 60)
-        print(f"项目: {manifest.get('project')}")
-        print(f"最后处理版本: {manifest.get('last_processed_version') or '无'}")
-        print(f"已处理版本数: {len(manifest.get('processed_versions', []))}")
+        logger.info("\n%s", "=" * 60)
+        logger.info("📊 版本清单状态")
+        logger.info("%s", "=" * 60)
+        logger.info("项目: %s", manifest.get('project'))
+        logger.info("最后处理版本: %s", manifest.get('last_processed_version') or '无')
+        logger.info("已处理版本数: %s", len(manifest.get('processed_versions', [])))
         
         if manifest.get("processed_versions"):
-            print("\n已处理版本:")
+            logger.info("\n已处理版本:")
             for v in manifest["processed_versions"]:
                 info = manifest.get("versions", {}).get(v, {})
                 reqs = info.get("requirements_added", 0)
                 processed_at = info.get("processed_at", "")[:10] if info.get("processed_at") else ""
-                print(f"  ✅ {v} ({reqs} 需求) - {processed_at}")
+                logger.info("  ✅ %s (%s 需求) - %s", v, reqs, processed_at)
         
-        print("\n" + "=" * 60)
+        logger.info("\n%s", "=" * 60)

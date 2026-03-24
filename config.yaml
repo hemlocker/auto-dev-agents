@@ -142,7 +142,7 @@ execution:
 feedback:
   # 问题自动转工单
   issues_to_tickets: true
-  
+
   # 优化建议自动转需求
   suggestions_to_requirements: true
 
@@ -153,3 +153,33 @@ notification:
     - on_cycle_complete      # 每轮完成
     - on_error               # 出错时
     - on_new_issues          # 发现新问题
+
+# 输入监控配置
+input_monitor:
+  check_interval_seconds: 30    # 文件变化检查间隔
+  default_timeout_seconds: 1800 # 监控子智能体超时
+  monitor_sleep_seconds: 10     # 监控循环休眠间隔
+
+# Token 估算配置（按内容类型分段比率）
+token_estimation:
+  # chars/token 比率，越小表示编码密度越高
+  ratio_cjk: 1.8       # 中文（简体/繁体）：~1.8 chars/token
+  ratio_latin: 4.0     # 英文/纯文本：~4.0 chars/token
+  ratio_code: 3.5       # 代码文件：~3.5 chars/token
+  ratio_mixed: 2.5     # 中英混合：~2.5 chars/token
+  # 采样配置
+  max_sample_mb: 2      # 内容检测时最多读取前 2MB
+  cjk_ratio_threshold: 0.15   # CJK 字符占比阈值（>15% 视为中文）
+  mixed_ratio_threshold: 0.02 # 混合阈值（>2% 视为混合）
+
+# 执行引擎配置
+engine:
+  http_timeout_seconds: 30      # HTTP 请求超时（常规）
+  http_timeout_short: 10         # HTTP 请求超时（短轮询）
+  subtask_timeout_add: 5         # 子任务 spawn 时追加到超时
+  wait_active_max_seconds: 300   # 等待活跃子智能体最大秒数
+  wait_active_first_seconds: 60   # 首次等待子智能体最大秒数
+  stage_timeout_default: 1800   # 阶段默认超时（秒）
+  stage_timeout_max: 3600        # 阶段完成等待最大超时（秒）
+  subtask_in_progress_threshold: 1800  # 子任务超时阈值（秒，超此认为失败可重试）
+  status_print_interval_seconds: 30    # 状态打印间隔

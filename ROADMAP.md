@@ -291,5 +291,5 @@ auto-dev-agents/
 
 | 日期 | 版本 | 更新内容 |
 |------|------|----------|
-| 2026-03-22 | v0.1.2 | 创建能力路线图 |
+| 2026-03-24 | v0.1.4 | **Magic Number 归拢**：将散落各处的魔法数字（超时/延迟/比率等）统一归入 `config.yaml`，作为唯一真相源；`WorkflowFacade` 暴露 `config` 属性，`run.py` 移除重复的 `_load_config`；`executors.py`、`input_monitor.py`、`models.py` 全部改为配置驱动 |
 | 2026-03-24 | v0.1.3 | **Critical 问题修复**：① 更新 SCRIPTS_GUIDE.md 匹配实际脚本 ② 创建 WorkflowFacade 统一状态门面整合三套状态管理器 ③ 替换所有裸 `except:` 为具体异常类型 ④ 修复 fragile import（context_manager.py） |

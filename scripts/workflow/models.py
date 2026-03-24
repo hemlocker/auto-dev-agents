@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 
 # ==================== 数据类定义 ====================
 
+# StageConfig 默认超时（与 config.yaml engine.stage_timeout_default 对应）
+DEFAULT_STAGE_TIMEOUT = 1800
+
+
 @dataclass
 class StageConfig:
     """阶段配置"""
@@ -22,8 +26,8 @@ class StageConfig:
     prompt: str = None
     depends_on: List[str] = field(default_factory=list)
     skip: bool = False
-    timeout: int = 1800
-    
+    timeout: int = DEFAULT_STAGE_TIMEOUT
+
     @classmethod
     def from_dict(cls, data: dict) -> 'StageConfig':
         """从字典创建"""
@@ -35,7 +39,7 @@ class StageConfig:
             prompt=data.get("prompt"),
             depends_on=data.get("depends_on", []),
             skip=data.get("skip", False),
-            timeout=data.get("timeout", 1800)
+            timeout=data.get("timeout", DEFAULT_STAGE_TIMEOUT)
         )
 
 

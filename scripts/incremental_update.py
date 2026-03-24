@@ -79,7 +79,7 @@ class IncrementalUpdateManager:
                         hashes[f"{subdir}/{f.name}"] = self._file_hash(f)
         return hashes
     
-    def detect_changes(self) -> Dict:
+    def check_changes(self) -> Dict:
         """检测输入变化"""
         state = self._load_state()
         old = state.get("input_hashes", {})
@@ -134,7 +134,7 @@ class IncrementalUpdateManager:
                            "deployment", "operations", "monitor", "optimizer"]
             }
         
-        changes = self.detect_changes()
+        changes = self.check_changes()
         if not changes["has_changes"]:
             return {"mode": "none", "reason": "无变化", "stages": []}
         

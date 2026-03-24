@@ -25,7 +25,11 @@ from typing import Dict, Set
 
 class InputMonitor:
     """输入目录监控器"""
-    
+
+    DEFAULT_TIMEOUT = 1800
+    DEFAULT_CHECK_INTERVAL = 30
+    DEFAULT_SLEEP_ON_ERROR = 10
+
     def __init__(self, project_name: str, base_dir: str = None):
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
@@ -34,6 +38,35 @@ class InputMonitor:
         self.state_file = self.project_dir / "monitor_state.json"
         self.running = True
         self.watch_dirs = ["feedback", "meetings", "emails", "tickets"]
+        self.config = self._load_config()
+
+    def _load_config(self) -> dict:
+        """从 config.yaml 加载配置（config.yaml 为唯一真相源）"""
+        config_path = self.base_dir / "config.yaml"
+        default_config = {
+            "input_monitor": {
+                "check_interval_seconds": self.DEFAULT_CHECK_INTERVAL,
+                "default_timeout_seconds": self.DEFAULT_TIMEOUT,
+                "monitor_sleep_seconds": self.DEFAULT_SLEEP_ON_ERROR,
+            }
+        }
+        if not config_path.exists():
+            return default_config
+        try:
+            import yaml
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            # 深度合并
+            for section, values in default_config.items():
+                if section not in cfg:
+                    cfg[section] = values
+                elif isinstance(cfg[section], dict) and isinstance(values, dict):
+                    for k, v in values.items():
+                        if k not in cfg[section]:
+                            cfg[section][k] = v
+            return cfg
+        except Exception:
+            return default_config
     
     def _load_state(self) -> dict:
         if self.state_file.exists():
@@ -134,6 +167,8 @@ class InputMonitor:
 {self.project_dir}/output/requirements/
 """
         
+        im = self.config.get("input_monitor", {})
+        timeout = im.get("default_timeout_seconds", self.DEFAULT_TIMEOUT)
         return {
             "action": "sessions_spawn",
             "params": {
@@ -141,7 +176,7 @@ class InputMonitor:
                 "mode": "run",
                 "task": task,
                 "cwd": str(self.base_dir),
-                "timeoutSeconds": 1800,
+                "timeoutSeconds": timeout,
                 "label": f"{self.project_name}_auto_requirement"
             },
             "trigger_info": {
@@ -151,7 +186,11 @@ class InputMonitor:
             }
         }
     
-    def run_continuous(self, check_interval: int = 30):
+    def run_continuous(self, check_interval: int = None):
+        im = self.config.get("input_monitor", {})
+        if check_interval is None:
+            check_interval = im.get("check_interval_seconds", self.DEFAULT_CHECK_INTERVAL)
+        sleep_on_error = im.get("monitor_sleep_seconds", self.DEFAULT_SLEEP_ON_ERROR)
         print(f"\n{'='*60}")
         print(f"👁️ 输入监控器启动")
         print(f"📁 项目: {self.project_name}")
@@ -180,7 +219,7 @@ class InputMonitor:
                 break
             except Exception as e:
                 print(f"❌ 错误: {e}")
-                time.sleep(10)
+                time.sleep(sleep_on_error)
         
         print("\n👋 监控器已停止")
     
@@ -199,13 +238,17 @@ class InputMonitor:
 
 
 def main():
+    monitor = InputMonitor(project_name=None)
+    default_interval = monitor.config.get("input_monitor", {}).get(
+        "check_interval_seconds", 30)
+
     parser = argparse.ArgumentParser(description="输入监控触发器")
     parser.add_argument("--project", "-p", required=True, help="项目名称")
     parser.add_argument("--start", action="store_true", help="启动持续监控")
     parser.add_argument("--check", "-c", action="store_true", help="检查一次变化")
     parser.add_argument("--status", "-s", action="store_true", help="查看状态")
-    parser.add_argument("--interval", "-i", type=int, default=30, help="检查间隔（秒）")
-    
+    parser.add_argument("--interval", "-i", type=int, default=default_interval, help="检查间隔（秒）")
+
     args = parser.parse_args()
     monitor = InputMonitor(project_name=args.project)
     

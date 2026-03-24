@@ -7,10 +7,15 @@ CSV 输入解析器 - 支持版本化需求输入
 """
 
 import csv
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Dict
 from datetime import datetime
+from .revision_history import version_sort_key
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,7 +88,7 @@ class CSVInputParser:
         versions_file = self.input_dir / "versions.csv"
         
         if not versions_file.exists():
-            print(f"⚠️ 版本清单文件不存在: {versions_file}")
+            logger.warning("版本清单文件不存在: %s", versions_file)
             return []
         
         versions = []
@@ -104,7 +109,7 @@ class CSVInputParser:
                     versions.append(version)
         
         # 按版本号排序
-        versions.sort(key=lambda v: self._version_sort_key(v.version))
+        versions.sort(key=version_sort_key)
         
         self._versions_cache = versions
         return versions
@@ -158,7 +163,7 @@ class CSVInputParser:
         version_info = self.get_version(version)
         
         if not version_info:
-            print(f"⚠️ 版本 {version} 不存在")
+            logger.warning("版本 %s 不存在", version)
             return []
         
         requirements = []
@@ -169,7 +174,7 @@ class CSVInputParser:
                 reqs = self._parse_requirements_file(file_path, version)
                 requirements.extend(reqs)
             else:
-                print(f"⚠️ 输入文件不存在: {file_path}")
+                logger.warning("输入文件不存在: %s", file_path)
         
         return requirements
     
@@ -184,7 +189,7 @@ class CSVInputParser:
                 # 验证必需列
                 if not self.REQUIRED_COLUMNS.issubset(set(reader.fieldnames or [])):
                     missing = self.REQUIRED_COLUMNS - set(reader.fieldnames or [])
-                    print(f"⚠️ 文件 {file_path} 缺少必需列: {missing}")
+                    logger.warning("文件 %s 缺少必需列: %s", file_path, missing)
                     return []
                 
                 for row_num, row in enumerate(reader, start=2):  # start=2 因为有表头
@@ -193,10 +198,10 @@ class CSVInputParser:
                         if req:
                             requirements.append(req)
                     except Exception as e:
-                        print(f"⚠️ 文件 {file_path} 第 {row_num} 行解析失败: {e}")
+                        logger.warning("文件 %s 第 %s 行解析失败: %s", file_path, row_num, e)
         
         except Exception as e:
-            print(f"⚠️ 无法读取文件 {file_path}: {e}")
+            logger.warning("无法读取文件 %s: %s", file_path, e)
         
         return requirements
     
@@ -325,23 +330,6 @@ class CSVInputParser:
             "warnings": warnings,
             "stats": stats
         }
-    
-    @staticmethod
-    def _version_sort_key(version: str) -> tuple:
-        """版本号排序键
-        
-        v1.0 -> (1, 0)
-        v1.1 -> (1, 1)
-        v2.0 -> (2, 0)
-        """
-        if not version.startswith('v'):
-            return (0, 0)
-        
-        try:
-            parts = version[1:].split('.')
-            return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-        except (ValueError, IndexError):
-            return (0, 0)
     
     def clear_cache(self):
         """清除缓存"""

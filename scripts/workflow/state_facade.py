@@ -12,8 +12,8 @@ Unified State Facade
   facade = WorkflowFacade(project_dir=Path("projects/my-project"))
 
   # 工作流控制（来自 WorkflowState）
-  facade.read()           # 读取状态
-  facade.write(state)     # 写入状态
+  facade.load_state()           # 读取状态
+  facade.save_state(state)     # 写入状态
   facade.pause()           # 暂停
   facade.resume()          # 恢复
   facade.reset()           # 重置
@@ -29,10 +29,13 @@ Unified State Facade
   facade.print_status()          # 打印状态
 
   # 统一上下文（来自 StateManager）
-  facade.get_section()    # 获取状态片段
-  facade.log_event()      # 记录事件
-  facade.record_decision() # 记录决策
-  facade.get_decisions()  # 获取决策
+  facade.get_section()          # 获取状态片段
+  facade.update_state()          # 更新状态字段
+  facade.log_event()             # 记录事件
+  facade.record_execution_log()  # 记录执行日志
+  facade.record_decision()       # 记录决策
+  facade.record_cycle_complete() # 记录循环完成
+  facade.get_decisions()         # 获取决策
 
 设计说明：
 - WorkflowState：基础工作流状态（暂停/恢复/重置/日志）
@@ -44,6 +47,7 @@ Unified State Facade
 """
 
 import json
+import logging
 import re
 import hashlib
 import threading
@@ -51,6 +55,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Set, Tuple
 from dataclasses import dataclass, asdict, field
+
+
+logger = logging.getLogger(__name__)
 
 
 # ==================== 内部数据类 ====================
@@ -154,6 +161,7 @@ class WorkflowFacade:
 
         # 加载配置文件（从 base_dir 读取）
         self._config = self._load_config()
+        self.config = self._config  # 暴露给外部模块
 
         # 从配置中读取输入输出目录（stage 级别配置优先）
         self._stage_configs = self._build_stage_configs()
@@ -185,14 +193,38 @@ class WorkflowFacade:
     # ========== 配置加载（读取 config.yaml）==========
 
     def _load_config(self) -> dict:
-        """从 base_dir/config.yaml 加载配置"""
+        """从 base_dir/config.yaml 加载配置（config.yaml 为唯一真相源）"""
         config_path = self.base_dir / "config.yaml"
+        # 与 config.yaml 相同的默认值；config.yaml 存在时以其为准
         default_config = {
             "input_dir": "input",
             "output_dir": "output",
             "stages": {},
             "pdca": {"max_cycles": 0, "cycle_interval_seconds": 60},
-            "execution": {"stage_delay_seconds": 30, "timeout_seconds": 1800}
+            "execution": {
+                "mode": "auto",
+                "stage_delay_seconds": 30,
+                "timeout_seconds": 1800,
+                "subtask": {"enabled": True, "delay_seconds": 5, "continue_on_failure": True},
+                "context": {
+                    "max_input_tokens": 150000,
+                    "max_file_size_kb": 150,
+                    "max_file_count": 50,
+                    "batch_size": 15,
+                    "output_reserve_tokens": 16384,
+                },
+            },
+            "input_monitor": {"check_interval_seconds": 30, "default_timeout_seconds": 1800, "monitor_sleep_seconds": 10},
+            "token_estimation": {
+                "ratio_cjk": 1.8, "ratio_latin": 4.0, "ratio_code": 3.5, "ratio_mixed": 2.5,
+                "max_sample_mb": 2, "cjk_ratio_threshold": 0.15, "mixed_ratio_threshold": 0.02,
+            },
+            "engine": {
+                "http_timeout_seconds": 30, "http_timeout_short": 10, "subtask_timeout_add": 5,
+                "wait_active_max_seconds": 300, "wait_active_first_seconds": 60,
+                "stage_timeout_default": 1800, "stage_timeout_max": 3600,
+                "subtask_in_progress_threshold": 1800, "status_print_interval_seconds": 30,
+            },
         }
         if not config_path.exists():
             return default_config
@@ -202,22 +234,26 @@ class WorkflowFacade:
                 config = yaml.safe_load(f)
                 if not config:
                     return default_config
-                # 合并默认配置
-                for key in default_config:
-                    if key not in config:
-                        config[key] = default_config[key]
-                return config
+                # 深度合并：default_config 填充 config 中的缺失字段
+                return self._deep_merge(default_config, config)
         except (ImportError, Exception):
-            # YAML 解析失败，尝试从纯文本提取
             return self._load_config_fallback(config_path, default_config)
 
+    def _deep_merge(self, defaults: dict, overrides: dict) -> dict:
+        """深度合并：defaults 为基础，overrides 的值覆盖（保留嵌套结构）"""
+        result = defaults.copy()
+        for key, value in overrides.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
     def _load_config_fallback(self, config_path: Path, default_config: dict) -> dict:
-        """无法解析 YAML 时，从纯文本提取配置"""
+        """无法解析 YAML 时，从纯文本提取关键配置"""
         try:
             content = config_path.read_text(encoding="utf-8")
             config = default_config.copy()
-
-            # 提取 input_dir / output_dir
             for key, default in [("input_dir", "input"), ("output_dir", "output")]:
                 m = re.search(rf"^{key}:\s*(.+?)$", content, re.MULTILINE)
                 if m:
@@ -291,7 +327,7 @@ class WorkflowFacade:
 
     # ========== 基础工作流状态（来自 WorkflowState）==========
 
-    def read(self) -> dict:
+    def load_state(self) -> dict:
         """读取基础工作流状态"""
         if not self._state_file.exists():
             return self._default_state()
@@ -300,7 +336,7 @@ class WorkflowFacade:
         except (json.JSONDecodeError, OSError):
             return self._default_state()
 
-    def write(self, state: dict):
+    def save_state(self, state: dict):
         """写入基础工作流状态"""
         state["updated_at"] = datetime.now().isoformat()
         self._state_file.write_text(
@@ -320,32 +356,32 @@ class WorkflowFacade:
 
     def pause(self):
         """暂停工作流"""
-        state = self.read()
+        state = self.load_state()
         state["paused"] = True
-        self.write(state)
+        self.save_state(state)
 
     def resume(self):
         """恢复工作流"""
-        state = self.read()
+        state = self.load_state()
         state["paused"] = False
-        self.write(state)
+        self.save_state(state)
 
     def reset(self):
         """重置状态"""
-        self.write(self._default_state())
+        self.save_state(self._default_state())
 
     def update_stage(self, phase: str, stage: str):
         """更新当前阶段"""
-        state = self.read()
+        state = self.load_state()
         state["current_phase"] = phase
         state["current_stage"] = stage
-        self.write(state)
+        self.save_state(state)
 
-    def log(self, phase: str, stage: str, spawn_config: dict):
+    def record_execution_log(self, phase: str, stage: str, spawn_config: dict):
         """记录执行日志"""
         log_entry = {
             "timestamp": datetime.now().isoformat(),
-            "cycle": self.read().get("cycle", 0),
+            "cycle": self.load_state().get("cycle", 0),
             "phase": phase,
             "stage": stage,
             "spawn_config": spawn_config
@@ -355,17 +391,17 @@ class WorkflowFacade:
 
     def record_cycle_complete(self):
         """记录循环完成"""
-        state = self.read()
+        state = self.load_state()
         state["history"].append({
             "cycle": state.get("cycle", 0),
             "completed_at": datetime.now().isoformat()
         })
         state["cycle"] = state.get("cycle", 0) + 1
-        self.write(state)
+        self.save_state(state)
 
     def get_status(self) -> dict:
         """获取状态摘要"""
-        state = self.read()
+        state = self.load_state()
         return {
             "cycle": state.get("cycle", 0),
             "current_phase": state.get("current_phase"),
@@ -524,16 +560,17 @@ class WorkflowFacade:
                 if started:
                     try:
                         elapsed = (datetime.now() - datetime.fromisoformat(started)).total_seconds()
-                        if elapsed > 1800:
+                        threshold = self.config.get("engine", {}).get("subtask_in_progress_threshold", 1800)
+                        if elapsed > threshold:
                             pending.append(name)
                         else:
-                            print(f"⏳ 子任务 {name} 正在执行中，跳过")
+                            logger.info("⏳ 子任务 %s 正在执行中，跳过", name)
                     except (ValueError, OSError):
                         pending.append(name)
                 else:
                     pending.append(name)
             else:
-                print(f"✅ 子任务 {name} 已完成，跳过")
+                logger.info("✅ 子任务 %s 已完成，跳过", name)
         return pending
 
     def get_completed_subtasks(self, stage: str) -> List[str]:
@@ -559,48 +596,48 @@ class WorkflowFacade:
 
     def print_status(self, stage: str = None):
         """打印状态信息"""
-        print("\n" + "=" * 60)
-        print("📊 项目状态")
-        print("=" * 60)
+        logger.info("\n%s", "=" * 60)
+        logger.info("📊 项目状态")
+        logger.info("%s", "=" * 60)
 
         # 基础工作流状态
-        basic = self.read()
-        print(f"\n📅 工作流: cycle={basic.get('cycle', 0)}, "
-              f"phase={basic.get('current_phase', 'N/A')}, "
-              f"stage={basic.get('current_stage', 'N/A')}")
+        basic = self.load_state()
+        logger.info("📅 工作流: cycle=%s, phase=%s, stage=%s",
+                     basic.get('cycle', 0),
+                     basic.get('current_phase', 'N/A'),
+                     basic.get('current_stage', 'N/A'))
 
         # 项目元信息
         meta = self.load_project_meta()
-        print(f"\n📁 项目: {meta.project_name or meta.name}")
-        print(f"   包名: {meta.package_name or '未设置'}")
+        logger.info("📁 项目: %s", meta.project_name or meta.name)
+        logger.info("   包名: %s", meta.package_name or '未设置')
 
         # 输入状态
         input_state = self._load_input_state()
         if input_state.get("last_scan"):
-            print(f"\n📥 输入文件: {len(input_state.get('file_hashes', {}))} 个")
-            print(f"   上次扫描: {input_state['last_scan']}")
+            logger.info("📥 输入文件: %s 个", len(input_state.get('file_hashes', {})))
+            logger.info("   上次扫描: %s", input_state['last_scan'])
 
         # 阶段状态
         stages = self.load_stage_status()
-        print(f"\n📅 阶段状态:")
+        logger.info("📅 阶段状态:")
+        emoji = {"completed": "✅", "in_progress": "🔄", "failed": "❌", "pending": "⏳"}
         for name in self.ALL_STAGES:
             s = stages.get(name)
             if s:
-                emoji = {"completed": "✅", "in_progress": "🔄", "failed": "❌", "pending": "⏳"}
-                print(f"   {emoji.get(s.status, '❓')} {name}: {s.status}")
+                logger.info("   %s %s: %s", emoji.get(s.status, '❓'), name, s.status)
             else:
-                print(f"   ⏳ {name}: pending")
+                logger.info("   ⏳ %s: pending", name)
 
         # 子任务状态
         if stage:
-            print(f"\n📋 子任务状态 ({stage}):")
+            logger.info("📋 子任务状态 (%s):", stage)
             subtasks = self.load_subtask_status(stage)
             for name, sub in subtasks.items():
-                emoji = {"completed": "✅", "in_progress": "🔄", "failed": "❌", "pending": "⏳"}
                 duration = f" ({sub.duration_ms // 1000}s)" if sub.duration_ms else ""
-                print(f"   {emoji.get(sub.status, '❓')} {name}{duration}")
+                logger.info("   %s %s%s", emoji.get(sub.status, '❓'), name, duration)
 
-        print("\n" + "=" * 60)
+        logger.info("\n%s", "=" * 60)
 
     # ========== 项目元信息 ==========
 
@@ -687,7 +724,7 @@ class WorkflowFacade:
                         hashes[rel] = self._file_hash(f)
         return hashes
 
-    def detect_input_changes(self) -> Dict[str, Any]:
+    def check_input_changes(self) -> Dict[str, Any]:
         """检测输入文件变化"""
         old_state = self._load_input_state()
         old_hashes = old_state.get("file_hashes", {})
@@ -731,7 +768,7 @@ class WorkflowFacade:
         """获取完整统一状态（兼容 StateManager.get() 接口）"""
         return self._load_unified_state()
 
-    def update(self, path: str, value: Any, by: str = "system") -> bool:
+    def update_state(self, path: str, value: Any, by: str = "system") -> bool:
         """
         更新状态（兼容 StateManager.update() 接口）
 
@@ -839,7 +876,7 @@ class WorkflowFacade:
         Returns:
             下一阶段名称，如果循环结束返回 None
         """
-        state = self.read()
+        state = self.load_state()
         current_stage = state.get("current_stage")
         current_phase = state.get("current_phase")
 
@@ -849,7 +886,7 @@ class WorkflowFacade:
 
         state["current_phase"] = next_phase
         state["current_stage"] = next_stage
-        self.write(state)
+        self.save_state(state)
         return next_stage
 
     def _get_next_stage(self, current_phase: str, current_stage: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1025,7 +1062,7 @@ class WorkflowFacade:
 
     def get_summary(self) -> dict:
         """获取状态摘要"""
-        basic = self.read()
+        basic = self.load_state()
         state = self._load_unified_state()
         return {
             "project": {
@@ -1065,7 +1102,7 @@ class WorkflowFacade:
             old_state = self._load_unified_state()
             new_state["project"] = old_state.get("project", new_state["project"])
         self._save_unified_state(new_state)
-        self.write(self._default_state())
+        self.save_state(self._default_state())
 
     # ========== 版本化管理（来自 DistributedStateManager）==========
 
@@ -1122,26 +1159,26 @@ class WorkflowFacade:
         all_versions = self.csv_parser.get_all_versions()
         processed = self.manifest_manager.get_processed_versions()
         pending = [v for v in all_versions if v not in processed]
-        print(f"\n📋 所有版本: {all_versions}")
-        print(f"✅ 已处理: {processed}")
-        print(f"⏳ 待处理: {pending}")
+        logger.info("\n📋 所有版本: %s", all_versions)
+        logger.info("✅ 已处理: %s", processed)
+        logger.info("⏳ 待处理: %s", pending)
         if pending:
-            print(f"\n📊 待处理需求统计:")
+            logger.info("📊 待处理需求统计:")
             for version in pending:
                 reqs = self.csv_parser.parse_requirements(version)
                 by_priority = {}
                 for req in reqs:
                     p = req.priority or "Unknown"
                     by_priority[p] = by_priority.get(p, 0) + 1
-                print(f"   {version}: {len(reqs)} 项需求")
+                logger.info("   %s: %s 项需求", version, len(reqs))
                 if by_priority:
-                    print(f"      优先级: {by_priority}")
+                    logger.info("      优先级: %s", by_priority)
         stats = self.manifest_manager.get_stats()
         if stats.get("total_versions", 0) > 0:
-            print(f"\n📈 累计统计:")
-            print(f"   已处理版本: {stats['total_versions']}")
-            print(f"   总需求: {stats['total_requirements']}")
-        print("\n" + "=" * 60)
+            logger.info("📈 累计统计:")
+            logger.info("   已处理版本: %s", stats['total_versions'])
+            logger.info("   总需求: %s", stats['total_requirements'])
+        logger.info("\n%s", "=" * 60)
 
     def mark_version_processed(self, versions: List[str], requirements_count: Dict[str, int] = None):
         """标记多个版本为已处理"""
@@ -1157,7 +1194,7 @@ class WorkflowFacade:
         """重置增量状态"""
         if self._input_state_file.exists():
             self._input_state_file.unlink()
-        print("✅ 增量状态已重置")
+        logger.info("✅ 增量状态已重置")
         """获取统一状态中的某个字段"""
         state = self._load_unified_state()
         keys = path.split(".")
@@ -1265,11 +1302,11 @@ class WorkflowFacade:
         """统一重置增量更新所需的状态"""
         if stages is None:
             stages = ["requirement", "design"]
-        print(f"\n🔄 重置增量更新状态...")
+        logger.info("🔄 重置增量更新状态...")
         # 重置输入状态
         if self._input_state_file.exists():
             self._input_state_file.unlink()
-            print(f"   ✅ 已重置输入状态")
+            logger.info("   ✅ 已重置输入状态")
         # 重置阶段子任务状态
         for stage in stages:
             status_file = self._get_subtask_status_file(stage)
@@ -1285,7 +1322,7 @@ class WorkflowFacade:
                         json.dumps(data, indent=2, ensure_ascii=False),
                         encoding="utf-8"
                     )
-                    print(f"   ✅ 已重置阶段 {stage} 的子任务状态")
+                    logger.info("   ✅ 已重置阶段 %s 的子任务状态", stage)
                 except (json.JSONDecodeError, OSError):
                     pass
-        print(f"✅ 增量更新状态重置完成")
+        logger.info("✅ 增量更新状态重置完成")

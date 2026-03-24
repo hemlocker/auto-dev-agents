@@ -27,7 +27,6 @@ scripts/
     ├── state.py                    # 工作流状态管理
     ├── distributed_state.py        # 分布式状态管理器（断点续传）
     ├── revision_history.py          # 修订历史管理
-    ├── versioned_output.py          # 版本化输出管理
     ├── manifest.py                  # 清单管理
     └── csv_parser.py                # CSV 输入解析器
 ```

@@ -11,11 +11,27 @@
 """
 
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field, asdict
 from threading import Lock
+
+
+logger = logging.getLogger(__name__)
+
+
+def version_sort_key(version: str) -> tuple:
+    """版本号排序键：支持 v<major>[.<minor>]，非法版本排在最前。"""
+    if not version.startswith('v'):
+        return (0, 0)
+
+    try:
+        parts = version[1:].split('.')
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except (ValueError, IndexError):
+        return (0, 0)
 
 
 @dataclass
@@ -62,7 +78,7 @@ class RevisionHistoryManager:
             try:
                 return json.loads(self.history_file.read_text(encoding="utf-8"))
             except Exception as e:
-                print(f"⚠️ 加载修订历史失败: {e}")
+                logger.warning("加载修订历史失败: %s", e)
         
         return {
             "project": "",
@@ -175,7 +191,12 @@ class RevisionHistoryManager:
             "|------|------|------|----------|"
         ]
         
-        for rev in revisions:
+        sorted_revisions = sorted(
+            revisions,
+            key=lambda rev: version_sort_key(rev.get("version", ""))
+        )
+
+        for rev in sorted_revisions:
             date_str = rev["date"][:10]  # 只取日期
             changes_desc = "; ".join(
                 c["description"] for c in rev.get("changes", [])
@@ -247,9 +268,9 @@ class RevisionHistoryManager:
         """打印修订历史"""
         history = self._load()
         
-        print("\n" + "=" * 60)
-        print("📋 修订历史")
-        print("=" * 60)
+        logger.info("\n%s", "=" * 60)
+        logger.info("📋 修订历史")
+        logger.info("%s", "=" * 60)
         
         if document:
             docs = {document: history["documents"].get(document, {})}
@@ -257,18 +278,18 @@ class RevisionHistoryManager:
             docs = history.get("documents", {})
         
         for doc_name, doc in docs.items():
-            print(f"\n📄 {doc_name}")
-            print(f"   当前版本: {doc.get('current_version') or '无'}")
-            print(f"   创建: {doc.get('created', '')[:10]}")
+            logger.info("\n📄 %s", doc_name)
+            logger.info("   当前版本: %s", doc.get('current_version') or '无')
+            logger.info("   创建: %s", doc.get('created', '')[:10])
             
             if doc.get("revisions"):
-                print("   修订记录:")
+                logger.info("   修订记录:")
                 for rev in doc["revisions"]:
                     date = rev["date"][:10]
                     for change in rev.get("changes", []):
-                        print(f"     {rev['version']} ({date}): {change['description']}")
+                        logger.info("     %s (%s): %s", rev['version'], date, change['description'])
         
-        print("\n" + "=" * 60)
+        logger.info("\n%s", "=" * 60)
     
     # ========== 重置 ==========
     
@@ -279,7 +300,7 @@ class RevisionHistoryManager:
         if document in history["documents"]:
             del history["documents"][document]
             self._save(history)
-            print(f"✅ 已重置文档 {document} 的修订历史")
+            logger.info("已重置文档 %s 的修订历史", document)
     
     def reset_all(self):
         """重置所有修订历史"""
@@ -288,7 +309,7 @@ class RevisionHistoryManager:
             "documents": {},
             "reset_at": datetime.now().isoformat()
         })
-        print("✅ 已重置所有修订历史")
+        logger.info("已重置所有修订历史")
 
 
 # ========== 变更类型常量 ==========

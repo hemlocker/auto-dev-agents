@@ -64,21 +64,21 @@ class WorkflowExecutor:
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
         self.project_dir = self.base_dir / "projects" / project_name
-        self.config = self._load_config()
         self.running = True
         self.execute = execute
         self.subagent_executor = SubagentExecutor() if execute else None
 
-        # 统一状态门面
+        # 统一状态门面（共享配置，config.yaml 为唯一真相源）
         self.facade = WorkflowFacade(self.project_dir, base_dir=self.base_dir)
+        self.config = self.facade.config  # 统一配置入口
 
-        # 输入输出目录（从 facade 配置读取，默认值来自 config.yaml）
+        # 输入输出目录（从 facade 配置读取）
         self.input_dir = self.facade.input_dir
         self.output_dir = self.facade.output_dir
 
         # 项目类型（从参数或配置读取）
         self.project_type = project_type or self.config.get("projects", {}).get("type", "fullstack")
-        
+
         # 子任务拆分策略（从参数或配置读取）
         self.subtask_strategy = subtask_strategy or self.config.get("workflow", {}).get("subtask_strategy", "layer")
         
@@ -91,36 +91,6 @@ class WorkflowExecutor:
         # 加载阶段配置
         self.stages = self._load_stages(template, stages_override)
         self.stage_map = {s.name: s for s in self.stages}
-
-    def _load_config(self) -> dict:
-        """加载配置"""
-        config_path = self.base_dir / "config.yaml"
-        default_config = {
-            "pdca": {"max_cycles": 0, "cycle_interval_seconds": 60},
-            "execution": {"stage_delay_seconds": 30, "timeout_seconds": 1800}
-        }
-        if not config_path.exists():
-            return default_config
-        try:
-            import yaml
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-                for key in default_config:
-                    if key not in config:
-                        config[key] = default_config[key]
-                return config
-        except (yaml.YAMLError, IOError, OSError):
-            content = config_path.read_text()
-            config = default_config.copy()
-            for key in ["max_cycles", "cycle_interval_seconds"]:
-                match = re.search(rf"{key}:\s*(\d+)", content)
-                if match:
-                    config["pdca"][key] = int(match.group(1))
-            for key in ["stage_delay_seconds", "timeout_seconds"]:
-                match = re.search(rf"{key}:\s*(\d+)", content)
-                if match:
-                    config["execution"][key] = int(match.group(1))
-            return config
 
     def _load_stages(self, template: str = None, stages_override: List[str] = None) -> List[StageConfig]:
         """加载阶段配置"""
@@ -369,7 +339,7 @@ class WorkflowExecutor:
         else:
             input_path = self.facade.get_input_dir(stage)
             output_path = self.facade.get_output_dir(stage)
-            timeout = self.config["execution"].get("timeout_seconds", 1800)
+            timeout = self.config["engine"].get("stage_timeout_default", 1800)
         
         prompt = self._load_prompt(stage)
         
@@ -489,7 +459,7 @@ class WorkflowExecutor:
         # 分析输入，决定是否分批
         input_path = self.project_dir / (stage_config.input_dir or "input/")
         if self.execute:
-            analyzer = InputAnalyzer(input_path, self.config.get("execution", {}))
+            analyzer = InputAnalyzer(input_path, self.config)
             analysis = analyzer.analyze()
             
             if analysis["needs_batch"] and stage in ["requirement", "design", "development"]:
@@ -517,7 +487,7 @@ class WorkflowExecutor:
         print(f"  输出: {spawn_config['output_dir']}")
         print(f"{'='*60}")
 
-        self.facade.log(phase, stage, spawn_config)
+        self.facade.record_execution_log(phase, stage, spawn_config)
 
         if self.execute and self.subagent_executor:
             print(f"\n🚀 启动子智能体: {spawn_config['params']['label']}")
@@ -552,7 +522,7 @@ class WorkflowExecutor:
                     if not completed:
                         spawn_config["duration"] = time.time() - start_time
                         spawn_config["success"] = False
-                        raise StageTimeoutError(stage, 3600)
+                        raise StageTimeoutError(stage, self.config["engine"].get("stage_timeout_max", 3600))
 
         spawn_config["duration"] = time.time() - start_time
         spawn_config["success"] = True
@@ -614,7 +584,9 @@ class WorkflowExecutor:
             }
         }
     
-    def _wait_for_no_active_subagents(self, max_wait: int = 300) -> bool:
+    def _wait_for_no_active_subagents(self, max_wait: int = None) -> bool:
+        if max_wait is None:
+            max_wait = self.config["engine"].get("wait_active_max_seconds", 300)
         """等待所有活跃子智能体完成
         
         Returns:
@@ -624,7 +596,7 @@ class WorkflowExecutor:
             return True
         
         waited = 0
-        poll_interval = 5
+        poll_interval = self.config["engine"].get("http_timeout_short", 10)
         
         while waited < max_wait:
             status = self.subagent_executor.check_status("__list_all__")
@@ -639,7 +611,7 @@ class WorkflowExecutor:
             payload = {"tool": "subagents", "args": {"action": "list"}}
             result = http_post(
                 f"{self.subagent_executor.gateway_url}/tools/invoke",
-                headers, payload, timeout=10
+                headers, payload, timeout=self.config["engine"].get("http_timeout_short", 10)
             )
             
             if result.get("status_code") == 200:
@@ -654,7 +626,7 @@ class WorkflowExecutor:
                     if active_count == 0:
                         return True
                     
-                    if waited % 30 == 0:  # 每30秒打印一次
+                    if waited % self.config["engine"].get("status_print_interval_seconds", 30) == 0:  # 每 N 秒打印一次
                         print(f"  ⚠️ 等待 {active_count} 个活跃子智能体完成...")
             
             time.sleep(poll_interval)
@@ -722,10 +694,11 @@ class WorkflowExecutor:
             # 🔒 在执行新子任务前，确保没有活跃的子智能体
             if self.execute and self.subagent_executor:
                 print(f"   🔒 检查活跃子智能体...")
-                if not self._wait_for_no_active_subagents(max_wait=60):
+                if not self._wait_for_no_active_subagents(
+                        max_wait=self.config["engine"].get("wait_active_first_seconds", 60)):
                     print(f"   ⚠️ 存在活跃子智能体，强制等待...")
-                    self._wait_for_no_active_subagents(max_wait=300)
-            
+                    self._wait_for_no_active_subagents(
+                        max_wait=self.config["engine"].get("wait_active_max_seconds", 300)):
             # 标记子任务开始
             subtask_start = time.time()
             self.facade.start_subtask(stage, subtask_name)
@@ -782,7 +755,7 @@ class WorkflowExecutor:
                 
                 # 子任务间增加间隔，确保资源释放
                 if i < len(execution_plan) - 1:
-                    delay = 10
+                    delay = self.config["execution"].get("subtask", {}).get("delay_seconds", 5)
                     print(f"   ⏳ 等待 {delay}s 后执行下一个子任务...")
                     time.sleep(delay)
                     
@@ -839,7 +812,7 @@ class WorkflowExecutor:
             Tuple[dict, Optional[str]]: (结果字典, session_key)
         """
         stage_config = self.stage_map.get(stage) or StageConfig(stage, phase or "custom")
-        timeout = stage_config.timeout if stage_config.timeout else 1800
+        timeout = stage_config.timeout if stage_config.timeout else self.config["engine"].get("stage_timeout_default", 1800)
         
         label = f"{self.project_name}_{phase}_{stage}_{subtask_name}"
         
@@ -903,7 +876,11 @@ class WorkflowExecutor:
         result, _ = self._execute_subtask_with_session(stage, phase, subtask_name, task_prompt, output_dir, wait)
         return result
     
-    def _wait_for_completion(self, session_key: str, poll_interval: int = 10, max_wait: int = 3600):
+    def _wait_for_completion(self, session_key: str, poll_interval: int = None, max_wait: int = None):
+        if poll_interval is None:
+            poll_interval = self.config["engine"].get("http_timeout_short", 10)
+        if max_wait is None:
+            max_wait = self.config["engine"].get("stage_timeout_max", 3600)
         """等待子智能体完成"""
         waited = 0
         while waited < max_wait:
@@ -921,7 +898,7 @@ class WorkflowExecutor:
 
     def execute_next(self) -> Optional[dict]:
         """执行下一阶段"""
-        state = self.facade.read()
+        state = self.facade.load_state()
         if state.get("paused"):
             print("工作流已暂停")
             return None

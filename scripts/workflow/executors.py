@@ -51,7 +51,11 @@ except ImportError:
     HAS_REQUESTS = False
 
 
-def http_post(url: str, headers: dict, payload: dict, timeout: int = 30) -> dict:
+# HTTP 请求默认超时（秒）
+HTTP_TIMEOUT_DEFAULT = 30
+
+
+def http_post(url: str, headers: dict, payload: dict, timeout: int = HTTP_TIMEOUT_DEFAULT) -> dict:
     """发送 HTTP POST 请求（优先使用 requests，否则使用 curl）"""
     if HAS_REQUESTS:
         try:
@@ -96,6 +100,10 @@ def http_post(url: str, headers: dict, payload: dict, timeout: int = 30) -> dict
 class SubagentExecutor:
     """子智能体执行器 - 通过 OpenClaw Gateway HTTP API 执行"""
 
+    # HTTP 超时默认值（与 config.yaml engine.http_timeout_* 对应）
+    HTTP_TIMEOUT_DEFAULT = 30   # 常规请求
+    HTTP_TIMEOUT_SHORT = 10      # 短轮询
+
     def __init__(self, gateway_url: str = None, gateway_token: str = None):
         self.gateway_url = gateway_url or GATEWAY_URL
         self.gateway_token = gateway_token or GATEWAY_TOKEN
@@ -122,7 +130,7 @@ class SubagentExecutor:
             f"{self.gateway_url}/tools/invoke",
             headers,
             payload,
-            timeout=30
+            timeout=self.HTTP_TIMEOUT_DEFAULT
         )
 
         if "error" in result:
@@ -148,7 +156,7 @@ class SubagentExecutor:
             f"{self.gateway_url}/tools/invoke",
             headers,
             payload,
-            timeout=10
+            timeout=self.HTTP_TIMEOUT_SHORT
         )
 
         if "error" in result:
@@ -175,9 +183,20 @@ class SubagentExecutor:
 
 class InputAnalyzer:
     """输入分析器 - 检查大小并决定处理策略"""
-    
-    # 中文约 1~2 字符/token，英文/代码约 4~5 字符/token
-    
+
+    DEFAULT_MAX_TOKENS = 150000
+    DEFAULT_MAX_FILES = 50
+    DEFAULT_BATCH_SIZE = 15
+    DEFAULT_OUTPUT_RESERVE = 16384
+
+    def __init__(self, input_dir: Path, config: dict = None):
+        self.input_dir = input_dir
+        self.config = config or {}
+        ctx = self.config.get("context", {})
+        self.max_tokens = ctx.get("max_input_tokens", self.DEFAULT_MAX_TOKENS)
+        self.max_files = ctx.get("max_file_count", self.DEFAULT_MAX_FILES)
+        self.batch_size = ctx.get("batch_size", self.DEFAULT_BATCH_SIZE)
+
     def analyze(self) -> dict:
         """分析输入目录（按文件内容类型精确估算 token）"""
         files = list(self._scan_files())
@@ -270,10 +289,14 @@ class InputAnalyzer:
         if ext in self._EXT_ENGLISH:
             return "latin"
 
-        # 扫描字符做统计
+        # 扫描字符做统计（采样前 max_sample_mb MB）
+        max_sample = (self.config.get("token_estimation", {}).get("max_sample_mb", 2) * 1024 * 1024)
+        cjk_threshold = (self.config.get("token_estimation", {}).get("cjk_ratio_threshold", 0.15)
+        mixed_threshold = (self.config.get("token_estimation", {}).get("mixed_ratio_threshold", 0.02)
+
         cjk_count = 0
         latin_count = 0
-        sample = text[: 1024 * 1024]  # 只采样前 1MB
+        sample = text[: max_sample]
         for ch in sample:
             if ch.isalpha():
                 if self._is_cjk_char(ch):
@@ -287,31 +310,29 @@ class InputAnalyzer:
 
         cjk_ratio = cjk_count / total_chars
 
-        if cjk_ratio > 0.15:
+        if cjk_ratio > cjk_threshold:
             return "cjk"
-        elif cjk_ratio > 0.02:
+        elif cjk_ratio > mixed_threshold:
             return "mixed"
         else:
             return "latin"
 
+    def _get_ratios(self) -> dict:
+        te = self.config.get("token_estimation", {})
+        return {
+            "cjk": te.get("ratio_cjk", self._RATIO_CJK),
+            "latin": te.get("ratio_latin", self._RATIO_LATIN),
+            "code": te.get("ratio_code", self._RATIO_CODE),
+            "mixed": te.get("ratio_mixed", self._RATIO_MIXED),
+        }
+
     def _estimate_tokens(self, size_bytes: int, path: Path = None, text: str = None) -> int:
-        """
-        估算 token 数量（基于文件内容字符分布）
-        - 代码/英文密集型：~3.5-5 chars/token
-        - 中文密集型：~1.5-2 chars/token
-        - 中英混合：~2-3 chars/token
-        """
+        """估算 token 数量（基于文件内容字符分布，比率从 config.token_estimation 读取）"""
         # 如果提供了路径和文本内容，精确估算
         if path is not None and text is not None:
             content_type = self._detect_content_type(path, text)
-            if content_type == "cjk":
-                return int(len(text) / self._RATIO_CJK)
-            elif content_type == "latin":
-                return int(len(text) / self._RATIO_LATIN)
-            elif content_type == "mixed":
-                return int(len(text) / self._RATIO_MIXED)
-            else:  # code
-                return int(len(text) / self._RATIO_CODE)
+            ratios = self._get_ratios()
+            return int(len(text) / ratios.get(content_type, ratios["latin"]))
 
         # 仅提供大小时，用分段假设估算
         # 小文件按实际字节，中等/大文件按代码类型
