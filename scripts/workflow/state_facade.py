@@ -51,6 +51,7 @@ import logging
 import re
 import hashlib
 import threading
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Set, Tuple
@@ -343,6 +344,21 @@ class WorkflowFacade:
             json.dumps(state, indent=2, ensure_ascii=False),
             encoding="utf-8"
         )
+
+    def read(self) -> dict:
+        """[已废弃] 使用 load_state() 替代"""
+        warnings.warn("read() 已废弃，请使用 load_state()", DeprecationWarning, stacklevel=2)
+        return self.load_state()
+
+    def write(self, state: dict):
+        """[已废弃] 使用 save_state() 替代"""
+        warnings.warn("write() 已废弃，请使用 save_state()", DeprecationWarning, stacklevel=2)
+        self.save_state(state)
+
+    def log(self, phase: str, stage: str, spawn_config: dict):
+        """[已废弃] 使用 record_execution_log() 替代"""
+        warnings.warn("log() 已废弃，请使用 record_execution_log()", DeprecationWarning, stacklevel=2)
+        self.record_execution_log(phase, stage, spawn_config)
 
     def _default_state(self) -> dict:
         return {
@@ -779,6 +795,11 @@ class WorkflowFacade:
         """
         return self.batch_update({path: value}, by=by)
 
+    def update(self, path: str, value: Any, by: str = "system") -> bool:
+        """[已废弃] 使用 update_state() 替代"""
+        warnings.warn("update() 已废弃，请使用 update_state()", DeprecationWarning, stacklevel=2)
+        return self.update_state(path, value, by)
+
     def get_section(self, path: str, default=None) -> Any:
         """获取统一状态中的某个字段（兼容 StateManager 接口）"""
         state = self._load_unified_state()
@@ -1174,10 +1195,10 @@ class WorkflowFacade:
                 if by_priority:
                     logger.info("      优先级: %s", by_priority)
         stats = self.manifest_manager.get_stats()
-        if stats.get("total_versions", 0) > 0:
+        if stats.get("total_versions_processed", 0) > 0:
             logger.info("📈 累计统计:")
-            logger.info("   已处理版本: %s", stats['total_versions'])
-            logger.info("   总需求: %s", stats['total_requirements'])
+            logger.info("   已处理版本: %s", stats['total_versions_processed'])
+            logger.info("   总需求: %s", stats['total_requirements_added'])
         logger.info("\n%s", "=" * 60)
 
     def mark_version_processed(self, versions: List[str], requirements_count: Dict[str, int] = None):
@@ -1195,16 +1216,6 @@ class WorkflowFacade:
         if self._input_state_file.exists():
             self._input_state_file.unlink()
         logger.info("✅ 增量状态已重置")
-        """获取统一状态中的某个字段"""
-        state = self._load_unified_state()
-        keys = path.split(".")
-        result = state
-        for key in keys:
-            if isinstance(result, dict) and key in result:
-                result = result[key]
-            else:
-                return default
-        return result
 
     def _load_unified_state(self) -> dict:
         """加载统一状态"""

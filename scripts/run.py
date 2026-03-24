@@ -28,9 +28,10 @@ Workflow Executor
 
 import argparse
 import json
+import logging
+import os
 import re
 import time
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -1200,6 +1201,8 @@ def main():
                         help="重置增量状态")
     parser.add_argument("--version-status", action="store_true",
                         help="显示版本状态")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="静默模式，抑制详细日志输出")
     parser.add_argument("--pending-versions", action="store_true",
                         help="显示待处理版本")
     parser.add_argument("--reset-version", action="store_true",
@@ -1210,6 +1213,11 @@ def main():
                         help="统一重置增量更新状态（输入状态 + 子任务状态 + 阶段状态）")
 
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.WARNING if args.quiet else logging.INFO,
+        format="%(message)s",
+    )
 
     stages_override = None
     if args.stages:
@@ -1242,10 +1250,11 @@ def main():
         result["stages"] = [s.name for s in executor.stages]
         print(json.dumps(result, indent=2, ensure_ascii=False))
         
-        # 打印断点续传状态
-        print("\n" + "=" * 60)
-        print("📊 断点续传状态")
-        print("=" * 60)
+        # 打印断点续传状态（受 --quiet 控制）
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("📊 断点续传状态")
+        logger.info("=" * 60)
         executor.facade.print_status(
             stage=args.stages.split(",")[0] if args.stages else None
         )
@@ -1272,9 +1281,6 @@ def main():
         executor.facade.reset_for_incremental_update()
 
     elif args.version_status:
-        print("\n" + "=" * 60)
-        print("📊 版本状态")
-        print("=" * 60)
         executor.facade.print_version_status()
 
     elif args.pending_versions:
