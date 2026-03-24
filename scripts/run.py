@@ -987,15 +987,33 @@ class WorkflowExecutor:
                 print(f"⚠️ 未知阶段: {stage}，跳过")
                 continue
 
-            result = self.execute_stage(stage)
-            results.append(result)
-            
-            # 记录版本处理
-            if incremental and result.get("success"):
-                self.dist_state.record_version_processed(
-                    version=self.dist_state.manifest_manager.get_latest_version() or "unknown",
-                    requirements_added=len(plan.get("new_requirements", []))
-                )
+            try:
+                result = self.execute_stage(stage)
+                results.append(result)
+                
+                # 🔧 修复：只在 requirement 阶段完成后记录版本处理
+                if incremental and result.get("success") and stage == "requirement":
+                    pending_versions = plan.get("pending_versions", [])
+                    for version in pending_versions:
+                        # 统计该版本的需求
+                        version_reqs = [r for r in plan.get("new_requirements", []) 
+                                       if hasattr(r, 'version') and r.version == version]
+                        self.dist_state.record_version_processed(
+                            version=version,
+                            requirements_added=len(version_reqs) if version_reqs else len(plan.get("new_requirements", []))
+                        )
+                    print(f"   ✅ 已记录版本处理完成: {', '.join(pending_versions)}")
+                    
+            except (DependencyError, StageExecutionError, StageTimeoutError) as e:
+                print(f"❌ 阶段 {stage} 执行失败: {e}")
+                results.append({
+                    "stage": stage,
+                    "success": False,
+                    "error": str(e),
+                    "error_type": type(e).__name__
+                })
+                # 继续执行下一个阶段而不是中断
+                continue
 
         return results
 
@@ -1209,6 +1227,8 @@ def main():
                         help="重置版本状态")
     parser.add_argument("--validate-input", action="store_true",
                         help="验证输入数据")
+    parser.add_argument("--reset-for-incremental", action="store_true",
+                        help="统一重置增量更新状态（输入状态 + 子任务状态 + 阶段状态）")
 
     args = parser.parse_args()
 
@@ -1268,6 +1288,9 @@ def main():
 
     elif args.reset_version:
         executor.dist_state.reset_version_state()
+
+    elif args.reset_for_incremental:
+        executor.dist_state.reset_for_incremental_update()
 
     elif args.version_status:
         print("\n" + "=" * 60)

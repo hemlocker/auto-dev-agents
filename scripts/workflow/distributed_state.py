@@ -850,3 +850,65 @@ class DistributedStateManager:
             print(f"   总需求: {stats['total_requirements']}")
         
         print("\n" + "=" * 60)
+    
+    def reset_for_incremental_update(self, stages: List[str] = None):
+        """统一重置增量更新所需的状态
+        
+        重置内容：
+        1. 输入状态文件（input_state.json）
+        2. 指定阶段的子任务状态
+        3. 阶段状态
+        
+        Args:
+            stages: 要重置的阶段列表（默认重置 requirement 和 design）
+        """
+        if stages is None:
+            stages = ["requirement", "design"]
+        
+        print(f"\n🔄 重置增量更新状态...")
+        
+        # 1. 重置输入状态
+        if self.input_state_file.exists():
+            self.input_state_file.unlink()
+            print(f"   ✅ 已重置输入状态")
+        
+        # 2. 重置阶段子任务状态
+        for stage in stages:
+            self._reset_stage_subtasks(stage)
+            print(f"   ✅ 已重置阶段 {stage} 的子任务状态")
+        
+        # 3. 重置阶段状态
+        stage_status_file = self.output_dir / ".stage_status.json"
+        if stage_status_file.exists():
+            try:
+                data = json.loads(stage_status_file.read_text(encoding="utf-8"))
+                for stage in stages:
+                    if stage in data.get("stages", {}):
+                        data["stages"][stage]["status"] = "pending"
+                        data["stages"][stage]["started_at"] = None
+                        data["stages"][stage]["completed_at"] = None
+                stage_status_file.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8"
+                )
+                print(f"   ✅ 已重置阶段状态")
+            except Exception as e:
+                print(f"   ⚠️ 重置阶段状态失败: {e}")
+        
+        print(f"✅ 增量更新状态重置完成")
+    
+    def mark_version_processed(self, versions: List[str], requirements_count: Dict[str, int] = None):
+        """标记多个版本为已处理
+        
+        Args:
+            versions: 版本列表
+            requirements_count: 各版本的需求数量 {version: count}
+        """
+        requirements_count = requirements_count or {}
+        for version in versions:
+            self.manifest_manager.record_version_processed(
+                version=version,
+                input_files=[],
+                requirements_added=requirements_count.get(version, 0)
+            )
+        print(f"✅ 已标记版本处理完成: {', '.join(versions)}")
