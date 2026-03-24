@@ -40,7 +40,7 @@ class InputMonitor:
             try:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except:
+            except (json.JSONDecodeError, IOError, OSError):
                 pass
         return {"file_hashes": {}, "last_check": None, "trigger_count": 0, "last_trigger": None}
     
@@ -53,7 +53,7 @@ class InputMonitor:
         try:
             with open(file_path, "rb") as f:
                 return hashlib.md5(f.read()).hexdigest()
-        except:
+        except (IOError, OSError):
             return ""
     
     def _scan_input_files(self) -> Dict[str, str]:

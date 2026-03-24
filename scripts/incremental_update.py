@@ -53,14 +53,14 @@ class IncrementalUpdateManager:
             return ""
         try:
             return hashlib.md5(path.read_bytes()).hexdigest()
-        except:
+        except (IOError, OSError):
             return ""
     
     def _load_state(self) -> Dict:
         if self.state_file.exists():
             try:
                 return json.loads(self.state_file.read_text())
-            except:
+            except (json.JSONDecodeError, IOError, OSError):
                 pass
         return {"input_hashes": {}, "completed_stages": [], "last_run": None}
     

@@ -1,400 +1,193 @@
 # 脚本使用指南
 
-**更新时间：** 2026-03-21 11:50  
-**版本：** 2.0
+**更新时间：** 2026-03-24
+**版本：** 3.0
+
+> ⚠️ **注意**：本项目不包含 `start_agents.py`、`stop_agents.py`、`manage_agents.py`、`view_logs.py`、`logger.py` 等脚本。这些脚本是早期设计阶段遗留的文档，请勿参考使用。
+
+> ✅ **实际入口**：`scripts/run.py` 是唯一的 CLI 入口。
 
 ---
 
-## 📁 脚本目录
+## 📁 实际脚本目录
 
 ```
 scripts/
-├── start_agents.py        # 启动脚本
-├── stop_agents.py         # 停止脚本
-├── manage_agents.py       # 管理脚本
-├── view_logs.py           # 日志查看脚本
-└── logger.py              # 日志模块
+├── run.py                          # 主入口 - 工作流执行器
+├── state_manager.py                # 统一状态管理器
+├── context_manager.py               # 上下文管理器
+├── quality_gate.py                 # 质量门禁
+├── input_monitor.py                # 输入监控触发器
+├── create_project.py               # 项目创建工具
+├── incremental_update.py           # 增量更新工具
+├── ticket_dedup.py                 # 工单去重工具
+└── workflow/
+    ├── models.py                   # 数据模型、子任务定义
+    ├── executors.py                # 子智能体执行器、输入分析器
+    ├── state.py                    # 工作流状态管理
+    ├── distributed_state.py        # 分布式状态管理器（断点续传）
+    ├── revision_history.py          # 修订历史管理
+    ├── versioned_output.py          # 版本化输出管理
+    ├── manifest.py                  # 清单管理
+    └── csv_parser.py                # CSV 输入解析器
 ```
 
 ---
 
-## 🚀 启动脚本 (start_agents.py)
+## 🚀 主入口 (run.py)
 
 ### 功能
-- 启动智能体系统
-- 运行完整工作流
-- 支持自定义项目目标
+- 工作流执行（单阶段 / 批量 / 完整 PDCA 循环）
+- 子任务拆分执行（支持断点续传）
+- 版本化增量更新
+- 状态查看
 
 ### 使用方式
 
 ```bash
-# 基本用法
-python3 scripts/start_agents.py
-
-# 指定项目目标
-python3 scripts/start_agents.py --goal "订单管理系统"
-
-# 使用工作流模式
-python3 scripts/start_agents.py --workflow
-
-# 使用 Cron 模式
-python3 scripts/start_agents.py --cron
-```
-
-### 示例
-
-```bash
-# 启动新项目
-python3 scripts/start_agents.py --goal "用户管理系统"
-
-# 查看实时日志
-tail -f logs/agents/coordinator.log
-```
-
----
-
-## 🛑 停止脚本 (stop_agents.py)
-
-### 功能
-- 停止运行中的智能体
-- 清理 PID 文件
-- 保存当前状态
-
-### 使用方式
-
-```bash
-# 基本用法
-python3 scripts/stop_agents.py
-
-# 强制停止
-python3 scripts/stop_agents.py --force
-
 # 查看状态
-python3 scripts/stop_agents.py --status
+python3 scripts/run.py -p my-project --status
 
-# 停止所有相关进程
-python3 scripts/stop_agents.py --all
+# 执行指定阶段
+python3 scripts/run.py -p my-project --stages requirement,design --execute
+
+# 执行完整 PDCA 循环
+python3 scripts/run.py -p my-project --full-cycle --execute
+
+# 使用模板
+python3 scripts/run.py -p my-project --template dev-only --execute
+
+# 指定项目类型和子任务策略
+python3 scripts/run.py -p my-project --project-type fullstack --subtask-strategy module --execute
+
+# 查看版本状态
+python3 scripts/run.py -p my-project --version-status
 ```
 
 ### 示例
 
 ```bash
-# 正常停止
-python3 scripts/stop_agents.py
+# 前后端分离项目
+python3 scripts/run.py -p my-project --project-type fullstack --stages requirement,design,development --execute
 
-# 查看运行状态
-python3 scripts/stop_agents.py --status
-
-# 强制停止卡住的进程
-python3 scripts/stop_agents.py --force
+# 纯后端项目
+python3 scripts/run.py -p my-project --project-type backend_only --stages requirement,design --execute
 ```
 
 ---
 
-## 🔧 管理脚本 (manage_agents.py)
+## 📊 状态管理
 
-### 功能
-- 查看智能体状态
-- 运行单个智能体
-- 查看工作流状态
-- 管理系统配置
-- 清理输出目录
+### 状态管理器 (state_manager.py)
 
-### 使用方式
+统一状态管理器，提供工作流状态、智能体状态、事件日志、反馈追踪等功能。
 
 ```bash
-# 查看智能体状态
-python3 scripts/manage_agents.py status
-
-# 运行单个智能体
-python3 scripts/manage_agents.py run RequirementAgent
-
-# 运行智能体并指定输入
-python3 scripts/manage_agents.py run DesignAgent --input output/requirements/
-
-# 停止智能体
-python3 scripts/manage_agents.py stop
-
-# 查看配置
-python3 scripts/manage_agents.py config --show
-
-# 检查配置
-python3 scripts/manage_agents.py config --check
-
-# 查看工作流状态
-python3 scripts/manage_agents.py workflow
-
-# 清理输出目录
-python3 scripts/manage_agents.py clean --confirm
+python3 scripts/state_manager.py -p my-project --summary
+python3 scripts/state_manager.py -p my-project --events
+python3 scripts/state_manager.py -p my-project --decisions
 ```
 
-### 示例
+### 工作流状态 (workflow/state.py)
+
+轻量级工作流状态管理，专注于执行进度追踪。
+
+### 分布式状态 (workflow/distributed_state.py)
+
+支持断点续传和版本化增量更新的分布式状态管理。
 
 ```bash
-# 查看所有智能体状态
-python3 scripts/manage_agents.py status
+# 重置增量状态
+python3 scripts/run.py -p my-project --reset-incremental --execute
 
-# 运行需求智能体
-python3 scripts/manage_agents.py run RequirementAgent
+# 重置版本状态
+python3 scripts/run.py -p my-project --reset-version --execute
 
-# 运行设计智能体，使用已有的需求文档
-python3 scripts/manage_agents.py run DesignAgent -i output/requirements/
-
-# 查看工作流执行结果
-python3 scripts/manage_agents.py workflow
-
-# 清理输出目录（先预览）
-python3 scripts/manage_agents.py clean
-
-# 确认清理
-python3 scripts/manage_agents.py clean --confirm
-```
-
----
-
-## 📊 日志查看脚本 (view_logs.py)
-
-### 功能
-- 查看所有日志文件列表
-- 查看特定智能体日志
-- 查看工作流日志
-- 查看 Cron 日志
-- 实时跟踪日志
-- 搜索日志内容
-- 导出日志
-
-### 使用方式
-
-```bash
-# 列出所有日志文件
-python3 scripts/view_logs.py list
-
-# 查看所有智能体日志
-python3 scripts/view_logs.py agents
-
-# 查看特定智能体日志
-python3 scripts/view_logs.py agents --agent RequirementAgent
-
-# 查看最后 N 行
-python3 scripts/view_logs.py agents --lines 50
-
-# 查看工作流日志
-python3 scripts/view_logs.py workflow
-
-# 查看 Cron 日志
-python3 scripts/view_logs.py cron
-
-# 实时跟踪日志
-python3 scripts/view_logs.py tail
-
-# 跟踪特定智能体
-python3 scripts/view_logs.py tail --agent Coordinator
-
-# 搜索日志
-python3 scripts/view_logs.py search "错误"
-
-# 搜索并限制结果数
-python3 scripts/view_logs.py search "质量" --limit 20
-
-# 导出日志
-python3 scripts/view_logs.py export
-
-# 导出到指定文件
-python3 scripts/view_logs.py export --output logs/backup.txt
-```
-
-### 示例
-
-```bash
-# 查看所有日志文件
-python3 scripts/view_logs.py list
-
-# 查看需求智能体日志（最后 100 行）
-python3 scripts/view_logs.py agents -a RequirementAgent -n 100
-
-# 实时跟踪协调智能体日志
-python3 scripts/view_logs.py tail -a Coordinator
-
-# 搜索所有包含"错误"的日志
-python3 scripts/view_logs.py search "错误"
-
-# 搜索质量相关的警告
-python3 scripts/view_logs.py search "质量" -l 30
-
-# 导出所有日志用于分析
-python3 scripts/view_logs.py export -o logs/all_logs_$(date +%Y%m%d).txt
-```
-
----
-
-## 📝 日志模块 (logger.py)
-
-### 功能
-- 统一的日志记录
-- 日志级别控制
-- 日志文件轮转
-- 日志分类存储
-
-### 使用方式
-
-```python
-from scripts.logger import (
-    get_logger,
-    log_agent_action,
-    log_stage_execution,
-    log_quality_check,
-    log_alert
-)
-
-# 获取日志记录器
-logger = get_logger("MyAgent")
-
-# 记录动作
-log_agent_action("MyAgent", "开始执行", "处理输入数据")
-
-# 记录阶段执行
-log_stage_execution(
-    stage_name="需求收集",
-    agent_name="RequirementAgent",
-    status="success",
-    quality=0.92,
-    duration=285.5
-)
-
-# 记录质量检查
-log_quality_check(
-    stage_name="需求收集",
-    check_name="需求完整性",
-    passed=True,
-    value=0.95,
-    threshold=0.85
-)
-
-# 记录告警
-log_alert(
-    level="P1",
-    stage="编码实现",
-    message="测试覆盖率不足",
-    value=0.65,
-    threshold=0.80
-)
+# 统一重置增量更新状态
+python3 scripts/run.py -p my-project --reset-for-incremental --execute
 ```
 
 ---
 
 ## 🔄 典型工作流
 
-### 1. 启动项目
+### 1. 启动新项目
 
 ```bash
-# 1. 启动智能体系统
-python3 scripts/start_agents.py --goal "订单管理系统"
+# 创建项目
+python3 scripts/create_project.py -p my-project --goal "订单管理系统"
 
-# 2. 实时查看日志
-python3 scripts/view_logs.py tail -a Coordinator
+# 执行需求分析
+python3 scripts/run.py -p my-project --stages requirement --execute
 ```
 
-### 2. 监控执行
+### 2. 增量迭代
 
 ```bash
-# 1. 查看智能体状态
-python3 scripts/manage_agents.py status
+# 添加新需求后，增量执行
+python3 scripts/run.py -p my-project --stages requirement,design,development --execute
 
-# 2. 查看工作流进度
-python3 scripts/manage_agents.py workflow
-
-# 3. 搜索错误日志
-python3 scripts/view_logs.py search "错误"
+# 查看进度
+python3 scripts/run.py -p my-project --status
 ```
 
-### 3. 管理智能体
+### 3. 监控执行
 
 ```bash
-# 1. 运行单个智能体
-python3 scripts/manage_agents.py run DesignAgent -i output/requirements/
+# 持续监控状态
+python3 scripts/run.py -p my-project --status
 
-# 2. 查看执行结果
-cat output/design/architecture.md
-
-# 3. 查看日志
-python3 scripts/view_logs.py agents -a DesignAgent -n 100
-```
-
-### 4. 停止系统
-
-```bash
-# 1. 正常停止
-python3 scripts/stop_agents.py
-
-# 2. 确认已停止
-python3 scripts/stop_agents.py --status
-
-# 3. 如有问题，强制停止
-python3 scripts/stop_agents.py --force
-```
-
-### 5. 清理和维护
-
-```bash
-# 1. 清理输出目录
-python3 scripts/manage_agents.py clean --confirm
-
-# 2. 导出日志备份
-python3 scripts/view_logs.py export -o logs/backup_$(date +%Y%m%d).txt
-
-# 3. 检查配置
-python3 scripts/manage_agents.py config --check
+# 查看断点续传状态
+python3 scripts/run.py -p my-project --version-status
 ```
 
 ---
 
-## 📊 日志文件结构
+## 📋 子任务执行
 
-```
-logs/
-├── agents/                  # 智能体日志
-│   ├── CoordinatorAgent.log
-│   ├── RequirementAgent.log
-│   ├── DesignAgent.log
-│   ├── DevelopmentAgent.log
-│   ├── TestingAgent.log
-│   ├── DeploymentAgent.log
-│   ├── OperationsAgent.log
-│   ├── MonitorAgent.log
-│   └── OptimizerAgent.log
-│
-├── workflows/               # 工作流日志
-│   └── workflow.log
-│
-├── cron/                    # Cron 日志
-│   └── cron.log
-│
-└── alerts/                  # 告警日志
-    └── alerts.log
-```
+系统支持子任务拆分执行，适用于大型项目的分阶段开发：
 
----
-
-## 🔍 日志级别
-
-| 级别 | 说明 | 使用场景 |
+| 策略 | 说明 | 适用场景 |
 |------|------|----------|
-| DEBUG | 调试信息 | 开发调试 |
-| INFO | 一般信息 | 正常运行信息 |
-| WARNING | 警告信息 | 需要注意但不影响运行 |
-| ERROR | 错误信息 | 执行失败 |
-| CRITICAL | 严重错误 | 系统故障 |
+| `layer` | 按技术层拆分（水平切片） | ≤2 个模块 |
+| `module` | 按功能模块拆分（垂直切片） | >2 个模块 |
+| `auto` | 自动选择 | 推荐默认 |
+
+---
+
+## 📂 输出文件结构
+
+```
+projects/{project}/
+├── project.json               # 项目元信息
+├── input/                     # 输入目录
+│   ├── feedback/
+│   ├── meetings/
+│   ├── emails/
+│   └── tickets/
+├── output/                    # 输出目录
+│   ├── requirements/          # 需求阶段输出
+│   ├── design/                # 设计阶段输出
+│   ├── src/                   # 开发阶段输出
+│   ├── tests/                 # 测试阶段输出
+│   ├── deploy/                # 部署阶段输出
+│   └── operations/            # 运维阶段输出
+└── state/                     # 状态目录
+    ├── state.json             # 统一状态
+    ├── events.jsonl           # 事件日志
+    └── contexts/              # 上下文缓存
+```
 
 ---
 
 ## 📖 相关文档
 
 - [README.md](../README.md) - 项目说明
-- [QUICKSTART.md](../QUICKSTART.md) - 快速开始
-- [PROJECT_FINAL_STATUS.md](./PROJECT_FINAL_STATUS.md) - 项目状态
+- [ROADMAP.md](../ROADMAP.md) - 能力路线图
+- [AGENT_ARCHITECTURE.md](./AGENT_ARCHITECTURE.md) - 智能体架构
 
 ---
 
-**状态：** ✅ 脚本齐全  
-**版本：** 2.0  
-**最后更新：** 2026-03-21
+**状态：** ⚠️ 文档已修正为匹配实际脚本
+**版本：** 3.0
+**最后更新：** 2026-03-24

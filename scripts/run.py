@@ -38,8 +38,7 @@ from typing import Optional, Dict, List, Tuple
 # 导入拆分的模块
 from workflow.models import StageConfig, STAGE_SUBTASKS, WorkflowError, StageExecutionError, StageTimeoutError, DependencyError
 from workflow.executors import InputAnalyzer, SubtaskExecutor, SubagentExecutor, http_post
-from workflow.state import WorkflowState
-from workflow.distributed_state import DistributedStateManager
+from workflow.state_facade import WorkflowFacade
 
 
 # ==================== WorkflowExecutor ====================
@@ -65,17 +64,18 @@ class WorkflowExecutor:
         self.project_name = project_name
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
         self.project_dir = self.base_dir / "projects" / project_name
-        self.input_dir = self.project_dir / "input"
-        self.output_dir = self.project_dir / "output"
         self.config = self._load_config()
         self.running = True
         self.execute = execute
         self.subagent_executor = SubagentExecutor() if execute else None
-        self.state = WorkflowState(self.project_dir)
-        
-        # 分布式状态管理器（支持断点续传）
-        self.dist_state = DistributedStateManager(self.project_dir)
-        
+
+        # 统一状态门面
+        self.facade = WorkflowFacade(self.project_dir, base_dir=self.base_dir)
+
+        # 输入输出目录（从 facade 配置读取，默认值来自 config.yaml）
+        self.input_dir = self.facade.input_dir
+        self.output_dir = self.facade.output_dir
+
         # 项目类型（从参数或配置读取）
         self.project_type = project_type or self.config.get("projects", {}).get("type", "fullstack")
         
@@ -109,7 +109,7 @@ class WorkflowExecutor:
                     if key not in config:
                         config[key] = default_config[key]
                 return config
-        except:
+        except (yaml.YAMLError, IOError, OSError):
             content = config_path.read_text()
             config = default_config.copy()
             for key in ["max_cycles", "cycle_interval_seconds"]:
@@ -162,8 +162,9 @@ class WorkflowExecutor:
         Returns:
             List[dict]: 模块列表 [{"name": "user", "dependencies": [], ...}]
         """
-        # 尝试从需求输出读取
-        modules_file = self.output_dir / "requirements" / "modules.json"
+        # 尝试从需求输出读取（使用配置的输出路径）
+        req_dir = self.facade.get_output_dir("requirement")
+        modules_file = req_dir / "modules.json"
         if modules_file.exists():
             try:
                 data = json.loads(modules_file.read_text(encoding="utf-8"))
@@ -171,17 +172,17 @@ class WorkflowExecutor:
                     return data
                 if isinstance(data, dict) and "modules" in data:
                     return data["modules"]
-            except:
+            except (json.JSONDecodeError, OSError):
                 pass
         
         # 尝试从分析结果读取
-        analysis_file = self.output_dir / "requirements" / "module_analysis.json"
+        analysis_file = req_dir / "module_analysis.json"
         if analysis_file.exists():
             try:
                 data = json.loads(analysis_file.read_text(encoding="utf-8"))
                 if "modules" in data:
                     return data["modules"]
-            except:
+            except (json.JSONDecodeError, OSError):
                 pass
         
         return []
@@ -201,8 +202,8 @@ class WorkflowExecutor:
                 ...
             }
         """
-        # 优先从 DistributedStateManager 读取
-        meta = self.dist_state.load_project_meta()
+        # 优先从统一状态门面读取
+        meta = self.facade.load_project_meta()
         if meta.package_name:
             return {
                 "project_name": meta.project_name or meta.name,
@@ -217,26 +218,27 @@ class WorkflowExecutor:
         if project_file.exists():
             try:
                 return json.loads(project_file.read_text(encoding="utf-8"))
-            except:
+            except (json.JSONDecodeError, OSError):
                 pass
         
-        # 尝试从需求阶段的软件需求文档提取
-        sw_req_file = self.output_dir / "requirements" / "software_requirements.md"
+        # 尝试从需求阶段的软件需求文档提取（使用配置的输出路径）
+        req_dir = self.facade.get_output_dir("requirement")
+        sw_req_file = req_dir / "software_requirements.md"
         if sw_req_file.exists():
             content = sw_req_file.read_text(encoding="utf-8")
             meta = self._extract_meta_from_requirements(content)
             if meta:
-                # 保存到 DistributedStateManager
-                self.dist_state.update_project_meta(**meta)
+                # 保存到统一状态门面
+                self.facade.update_project_meta(**meta)
                 return meta
         
         # 尝试从架构设计文档提取
-        arch_file = self.output_dir / "design" / "architecture_design.md"
+        arch_file = self.facade.get_output_dir("design") / "architecture_design.md"
         if arch_file.exists():
             content = arch_file.read_text(encoding="utf-8")
             meta = self._extract_meta_from_architecture(content)
             if meta:
-                self.dist_state.update_project_meta(**meta)
+                self.facade.update_project_meta(**meta)
                 return meta
         
         # 默认值：从项目名称生成
@@ -361,12 +363,12 @@ class WorkflowExecutor:
         
         if stage_config:
             input_path = self.project_dir / stage_config.input_dir if stage_config.input_dir else self.input_dir
-            output_path = self.project_dir / stage_config.output_dir if stage_config.output_dir else self.output_dir / stage
+            output_path = self.project_dir / stage_config.output_dir if stage_config.output_dir else self.facade.get_output_dir(stage)
             timeout = stage_config.timeout
             phase = phase or stage_config.phase
         else:
-            input_path = self.input_dir
-            output_path = self.output_dir / stage
+            input_path = self.facade.get_input_dir(stage)
+            output_path = self.facade.get_output_dir(stage)
             timeout = self.config["execution"].get("timeout_seconds", 1800)
         
         prompt = self._load_prompt(stage)
@@ -515,7 +517,7 @@ class WorkflowExecutor:
         print(f"  输出: {spawn_config['output_dir']}")
         print(f"{'='*60}")
 
-        self.state.log(phase, stage, spawn_config)
+        self.facade.log(phase, stage, spawn_config)
 
         if self.execute and self.subagent_executor:
             print(f"\n🚀 启动子智能体: {spawn_config['params']['label']}")
@@ -669,11 +671,11 @@ class WorkflowExecutor:
         all_subtask_names = [s["name"] for s in execution_plan]
         
         # 🔍 检查已完成的子任务（断点续传）
-        pending_subtask_names = self.dist_state.get_pending_subtasks(stage, all_subtask_names)
-        completed_subtask_names = self.dist_state.get_completed_subtasks(stage)
+        pending_subtask_names = self.facade.get_pending_subtasks(stage, all_subtask_names)
+        completed_subtask_names = self.facade.get_completed_subtasks(stage)
         
         # 打印进度
-        progress = self.dist_state.get_progress(stage, all_subtask_names)
+        progress = self.facade.get_progress(stage, all_subtask_names)
         
         print(f"\n{'='*60}")
         print(f"📦 阶段 {stage} 使用子任务增量执行")
@@ -701,7 +703,7 @@ class WorkflowExecutor:
         current_session_key = None  # 追踪当前子任务的 session
         
         # 标记阶段开始
-        self.dist_state.update_stage(stage, status="in_progress", 
+        self.facade.update_stage_status(stage, status="in_progress",
                                       started_at=datetime.now().isoformat())
         
         for i, subtask in enumerate(execution_plan):
@@ -726,7 +728,7 @@ class WorkflowExecutor:
             
             # 标记子任务开始
             subtask_start = time.time()
-            self.dist_state.start_subtask(stage, subtask_name)
+            self.facade.start_subtask(stage, subtask_name)
             
             try:
                 task_prompt = subtask_executor.generate_subtask_prompt(
@@ -751,7 +753,7 @@ class WorkflowExecutor:
                     })
                     
                     # ✅ 标记子任务完成（分布式状态）
-                    self.dist_state.complete_subtask(
+                    self.facade.complete_subtask(
                         stage, subtask_name,
                         duration_ms=subtask_duration,
                         output_dir=result.get("output_dir"),
@@ -769,7 +771,7 @@ class WorkflowExecutor:
                     })
                     
                     # 标记子任务失败
-                    self.dist_state.fail_subtask(stage, subtask_name, error=result.get("error"))
+                    self.facade.fail_subtask(stage, subtask_name, error=result.get("error"))
                 
                 subtask_results.append({
                     "subtask": subtask_name,
@@ -786,7 +788,7 @@ class WorkflowExecutor:
                     
             except Exception as e:
                 print(f"   ❌ 子任务失败: {e}")
-                self.dist_state.fail_subtask(stage, subtask_name, error=str(e))
+                self.facade.fail_subtask(stage, subtask_name, error=str(e))
                 subtask_results.append({
                     "subtask": subtask_name,
                     "success": False,
@@ -798,7 +800,7 @@ class WorkflowExecutor:
         success_count = sum(1 for r in subtask_results if r.get("success"))
         
         # 重新获取进度
-        final_progress = self.dist_state.get_progress(stage, all_subtask_names)
+        final_progress = self.facade.get_progress(stage, all_subtask_names)
         
         print(f"\n{'='*60}")
         print(f"📊 阶段 {stage} 子任务执行完成")
@@ -809,12 +811,12 @@ class WorkflowExecutor:
         
         # ✅ 阶段完成后更新状态
         if final_progress['completed'] == len(execution_plan):
-            self.dist_state.update_stage(
+            self.facade.update_stage_status(
                 stage, status="completed",
                 completed_at=datetime.now().isoformat(),
                 duration_ms=int(total_duration * 1000)
             )
-            self.state.update_stage(phase, stage)
+            self.facade.update_stage(phase, stage)
         
         return {
             "stage": stage,
@@ -919,7 +921,7 @@ class WorkflowExecutor:
 
     def execute_next(self) -> Optional[dict]:
         """执行下一阶段"""
-        state = self.state.read()
+        state = self.facade.read()
         if state.get("paused"):
             print("工作流已暂停")
             return None
@@ -931,7 +933,7 @@ class WorkflowExecutor:
 
         try:
             result = self.execute_stage(stage, phase)
-            self.state.update_stage(phase, stage)
+            self.facade.update_stage(phase, stage)
             return result
         except WorkflowError as e:
             print(f"执行失败: {e}")
@@ -951,7 +953,7 @@ class WorkflowExecutor:
         
         # 版本化增量检测
         if incremental:
-            plan = self.dist_state.get_versioned_incremental_plan(stages)
+            plan = self.facade.get_versioned_incremental_plan(stages)
             
             if plan["mode"] == "none":
                 print(f"\n✅ {plan['reason']}，跳过执行")
@@ -998,7 +1000,7 @@ class WorkflowExecutor:
                         # 统计该版本的需求
                         version_reqs = [r for r in plan.get("new_requirements", []) 
                                        if hasattr(r, 'version') and r.version == version]
-                        self.dist_state.record_version_processed(
+                        self.facade.record_version_processed(
                             version=version,
                             requirements_added=len(version_reqs) if version_reqs else len(plan.get("new_requirements", []))
                         )
@@ -1019,7 +1021,7 @@ class WorkflowExecutor:
 
     def execute_full_cycle(self) -> dict:
         """执行完整工作流"""
-        self.state.reset()
+        self.facade.reset()
 
         stats = {
             "total": 0,
@@ -1057,7 +1059,7 @@ class WorkflowExecutor:
                     result["phase"] = phase
                     stats["stages"].append(result)
                     stats["success"] += 1
-                    self.state.update_stage(phase, stage)
+                    self.facade.update_stage(phase, stage)
                     
                 except DependencyError as e:
                     print(f"⚠️ 依赖检查失败: {e}")
@@ -1095,7 +1097,7 @@ class WorkflowExecutor:
         stats["duration"] = time.time() - start_time
         
         if stats["failed"] == 0:
-            self.state.record_cycle_complete()
+            self.facade.record_cycle_complete()
             print(f"\n✅ PDCA 循环完成")
         else:
             print(f"\n❌ PDCA 循环中断: {stats['error']}")
@@ -1132,14 +1134,14 @@ class WorkflowExecutor:
     def status(self) -> dict:
         """获取状态（包含断点续传信息）"""
         project_info = self._load_project_info()
-        project_meta = self.dist_state.load_project_meta()
+        project_meta = self.facade.load_project_meta()
         
         # 获取各阶段的子任务进度
         stage_progress = {}
         for stage in self.stages:
             subtasks = STAGE_SUBTASKS.get(stage.name, [])
             if subtasks:
-                progress = self.dist_state.get_progress(stage.name, 
+                progress = self.facade.get_progress(stage.name, 
                     [s.get("name", s) if isinstance(s, dict) else s for s in subtasks])
                 stage_progress[stage.name] = progress
         
@@ -1155,7 +1157,7 @@ class WorkflowExecutor:
             },
             "goal": project_info.get("goal", "未设置"),
             "stage_progress": stage_progress,
-            **self.state.get_status(),
+            **self.facade.get_status(),
             "config": {
                 "max_cycles": self.config["pdca"].get("max_cycles", 0),
                 "stage_delay": self.config["execution"].get("stage_delay_seconds", 30)
@@ -1267,44 +1269,44 @@ def main():
         print("\n" + "=" * 60)
         print("📊 断点续传状态")
         print("=" * 60)
-        executor.dist_state.print_status(
+        executor.facade.print_status(
             stage=args.stages.split(",")[0] if args.stages else None
         )
 
     elif args.pause:
-        executor.state.pause()
+        executor.facade.pause()
         print("已暂停")
 
     elif args.resume:
-        executor.state.resume()
+        executor.facade.resume()
         print("已恢复")
 
     elif args.reset:
-        executor.state.reset()
+        executor.facade.reset()
         print("已重置")
 
     elif args.reset_incremental:
-        executor.dist_state.reset_incremental_state()
+        executor.facade.reset_incremental_state()
 
     elif args.reset_version:
-        executor.dist_state.reset_version_state()
+        executor.facade.reset_version_state()
 
     elif args.reset_for_incremental:
-        executor.dist_state.reset_for_incremental_update()
+        executor.facade.reset_for_incremental_update()
 
     elif args.version_status:
         print("\n" + "=" * 60)
         print("📊 版本状态")
         print("=" * 60)
-        executor.dist_state.print_version_status()
+        executor.facade.print_version_status()
 
     elif args.pending_versions:
-        plan = executor.dist_state.get_versioned_incremental_plan()
+        plan = executor.facade.get_versioned_incremental_plan()
         print(f"\n📋 待处理版本: {plan.get('pending_versions', [])}")
         print(f"   新增需求: {len(plan.get('new_requirements', []))}")
 
     elif args.validate_input:
-        result = executor.dist_state.csv_parser.validate_input()
+        result = executor.facade.csv_parser.validate_input()
         print(f"\n✅ 输入验证: {'通过' if result['valid'] else '失败'}")
         if result['errors']:
             print(f"❌ 错误: {result['errors']}")

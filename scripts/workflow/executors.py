@@ -31,7 +31,7 @@ def _load_gateway_token() -> Optional[str]:
                 auth = config.get("gateway", {}).get("auth", {})
                 if auth.get("mode") == "token":
                     return auth.get("token")
-        except:
+        except (json.JSONDecodeError, IOError, OSError):
             pass
     return None
 
@@ -83,7 +83,7 @@ def http_post(url: str, headers: dict, payload: dict, timeout: int = 30) -> dict
             response_text = result.stdout
             try:
                 return {"status_code": 200, "text": response_text, "json": json.loads(response_text) if response_text else None}
-            except:
+            except (json.JSONDecodeError, ValueError):
                 return {"status_code": 500, "text": response_text}
         except Exception as e:
             return {"error": str(e)}
@@ -176,29 +176,33 @@ class SubagentExecutor:
 class InputAnalyzer:
     """输入分析器 - 检查大小并决定处理策略"""
     
-    CHARS_PER_TOKEN = 2
-    DEFAULT_MAX_TOKENS = 150000
-    DEFAULT_MAX_FILES = 50
-    DEFAULT_BATCH_SIZE = 15
-    DEFAULT_OUTPUT_RESERVE = 16384
-    SUPPORTED_EXTENSIONS = [".md", ".txt", ".json", ".yaml", ".yml"]
-    
-    def __init__(self, input_dir: Path, config: dict = None):
-        self.input_dir = input_dir
-        self.config = config or {}
-        context_config = self.config.get("context", {})
-        self.max_tokens = context_config.get("max_input_tokens", self.DEFAULT_MAX_TOKENS)
-        self.max_files = context_config.get("max_file_count", self.DEFAULT_MAX_FILES)
-        self.batch_size = context_config.get("batch_size", self.DEFAULT_BATCH_SIZE)
+    # 中文约 1~2 字符/token，英文/代码约 4~5 字符/token
     
     def analyze(self) -> dict:
-        """分析输入目录"""
+        """分析输入目录（按文件内容类型精确估算 token）"""
         files = list(self._scan_files())
         total_size = sum(f["size"] for f in files)
-        total_tokens = self._estimate_tokens(total_size)
-        
+
+        # 逐文件按内容类型精确估算 token
+        total_tokens = 0
+        for f in files:
+            file_path = Path(f["path"])
+            try:
+                # 小文件直接读取内容估算，中大文件按字节估算
+                if f["size"] < 1024 * 1024:  # < 1MB 读内容
+                    text = file_path.read_text(encoding="utf-8", errors="replace")
+                    tokens = self._estimate_tokens(f["size"], path=file_path, text=text)
+                else:
+                    # 大文件只读前 2MB 做采样估算
+                    with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(2 * 1024 * 1024)
+                    tokens = self._estimate_tokens(f["size"], path=file_path, text=text)
+            except OSError:
+                tokens = self._estimate_tokens(f["size"])
+            total_tokens += tokens
+
         needs_batch = total_tokens > self.max_tokens or len(files) > self.max_files
-        
+
         return {
             "file_count": len(files),
             "total_size_kb": round(total_size / 1024, 2),
@@ -221,9 +225,102 @@ class InputAnalyzer:
                     "relative": str(f.relative_to(self.input_dir))
                 }
     
-    def _estimate_tokens(self, size_bytes: int) -> int:
-        """估算 token 数量"""
-        return size_bytes // self.CHARS_PER_TOKEN
+    SUPPORTED_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml",
+                             ".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp",
+                             ".h", ".cs", ".rb", ".php", ".swift", ".kt",
+                             ".sql", ".sh", ".vue", ".jsx", ".tsx", ".html", ".css",
+                             ".xml", ".toml", ".ini", ".rst", ".adoc", ".log"}
+
+    # 逐文件按内容类型估算的 ratio
+    _RATIO_CJK = 1.8       # 中文：~1.8 chars/token
+    _RATIO_LATIN = 4.0     # 英文/纯文本：~4 chars/token
+    _RATIO_CODE = 3.5      # 代码：~3.5 chars/token
+    _RATIO_MIXED = 2.5     # 中英混合：~2.5 chars/token
+
+    _EXT_CODE = {
+        ".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp",
+        ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt",
+        ".sql", ".sh", ".bash", ".ps1", ".bat", ".yaml", ".yml",
+        ".json", ".xml", ".toml", ".ini", ".cfg", ".conf",
+        ".vue", ".jsx", ".tsx", ".svelte", ".html", ".css",
+        ".scss", ".sass", ".less", ".md",
+    }
+    _EXT_ENGLISH = {".txt", ".log", ".rst", ".adoc"}
+
+    def _is_cjk_char(self, ch: str) -> bool:
+        cp = ord(ch)
+        # CJK 统一表意文字、扩展区、日韩兼容区
+        return (0x4E00 <= cp <= 0x9FFF or
+                0x3400 <= cp <= 0x4DBF or
+                0x20000 <= cp <= 0x2A6DF or
+                0x2A700 <= cp <= 0x2B73F or
+                0x2B740 <= cp <= 0x2B81F or
+                0x3000 <= cp <= 0x303F or   # CJK 符号
+                0xFF00 <= cp <= 0xFFEF)    # 全角字符
+
+    def _detect_content_type(self, path: Path, text: str) -> str:
+        """检测内容类型: 'code' | 'cjk' | 'latin' | 'mixed'"""
+        ext = path.suffix.lower()
+
+        # 代码类文件优先按代码估算
+        if ext in self._EXT_CODE:
+            return "code"
+
+        # 纯文本文件
+        if ext in self._EXT_ENGLISH:
+            return "latin"
+
+        # 扫描字符做统计
+        cjk_count = 0
+        latin_count = 0
+        sample = text[: 1024 * 1024]  # 只采样前 1MB
+        for ch in sample:
+            if ch.isalpha():
+                if self._is_cjk_char(ch):
+                    cjk_count += 1
+                else:
+                    latin_count += 1
+
+        total_chars = cjk_count + latin_count
+        if total_chars == 0:
+            return "code"  # 空文件或纯符号
+
+        cjk_ratio = cjk_count / total_chars
+
+        if cjk_ratio > 0.15:
+            return "cjk"
+        elif cjk_ratio > 0.02:
+            return "mixed"
+        else:
+            return "latin"
+
+    def _estimate_tokens(self, size_bytes: int, path: Path = None, text: str = None) -> int:
+        """
+        估算 token 数量（基于文件内容字符分布）
+        - 代码/英文密集型：~3.5-5 chars/token
+        - 中文密集型：~1.5-2 chars/token
+        - 中英混合：~2-3 chars/token
+        """
+        # 如果提供了路径和文本内容，精确估算
+        if path is not None and text is not None:
+            content_type = self._detect_content_type(path, text)
+            if content_type == "cjk":
+                return int(len(text) / self._RATIO_CJK)
+            elif content_type == "latin":
+                return int(len(text) / self._RATIO_LATIN)
+            elif content_type == "mixed":
+                return int(len(text) / self._RATIO_MIXED)
+            else:  # code
+                return int(len(text) / self._RATIO_CODE)
+
+        # 仅提供大小时，用分段假设估算
+        # 小文件按实际字节，中等/大文件按代码类型
+        if size_bytes < 50 * 1024:  # < 50KB，精确估算
+            return size_bytes // 2
+        elif size_bytes < 1024 * 1024:  # 50KB - 1MB，混合估算
+            return int(size_bytes / self._RATIO_MIXED)
+        else:  # > 1MB，按代码类型（通常压缩率高）
+            return int(size_bytes / self._RATIO_CODE)
     
     def _get_batch_reason(self, files: list, total_tokens: int) -> str:
         """获取需要分批的原因"""

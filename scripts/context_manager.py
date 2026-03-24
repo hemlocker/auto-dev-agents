@@ -31,15 +31,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 
-# 使用绝对导入
+# 使用绝对导入（兼容直接运行和模块导入两种场景）
 import sys
-sys.path.insert(0, str(Path(__file__).parent))
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
-from state_manager import StateManager
+from scripts.workflow.state_facade import WorkflowFacade
 
 
 class ContextManager:
     """上下文管理器 - 增强智能体间的上下文传递"""
+
+    def __init__(self, project_name: str, base_dir: str = None):
+        self.project_name = project_name
+        self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
+        self.project_dir = self.base_dir / "projects" / project_name
+
+        # 初始化统一状态门面（传递 base_dir 以读取 config.yaml）
+        self.state = WorkflowFacade(self.project_dir, base_dir=self.base_dir)
+
+        # 上下文缓存目录
+        self.context_cache_dir = self.project_dir / "state" / "contexts"
+        self.context_cache_dir.mkdir(parents=True, exist_ok=True)
     
     # 阶段依赖关系
     STAGE_DEPENDENCIES = {
@@ -179,19 +193,7 @@ class ContextManager:
 
 **请根据以上上下文完成任务，并在完成后生成执行日志。**
 """
-    
-    def __init__(self, project_name: str, base_dir: str = None):
-        self.project_name = project_name
-        self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent.parent
-        self.project_dir = self.base_dir / "projects" / project_name
-        
-        # 初始化状态管理器
-        self.state = StateManager(project_name, base_dir)
-        
-        # 上下文缓存目录
-        self.context_cache_dir = self.project_dir / "state" / "contexts"
-        self.context_cache_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # ==================== 核心方法 ====================
     
     def prepare_context(self, stage: str, phase: str = None, 
@@ -434,7 +436,7 @@ class ContextManager:
             try:
                 data = json.loads(summary_file.read_text(encoding="utf-8"))
                 return data.get("summary")
-            except:
+            except (json.JSONDecodeError, IOError, OSError):
                 pass
         
         return None
@@ -452,12 +454,27 @@ class ContextManager:
         ]
     
     def _get_input_files(self, stage: str) -> List[dict]:
-        """获取阶段的输入文件列表"""
+        """获取阶段的输入文件列表（使用配置的实际输入目录）"""
+        input_base = self.state.get_input_dir(stage)
         patterns = self.INPUT_PATTERNS.get(stage, [])
         files = []
-        
+
+        if not patterns:
+            # 无预设模式：扫描输入目录下的所有文件
+            if input_base.exists() and input_base.is_dir():
+                for file_path in input_base.rglob("*"):
+                    if file_path.is_file() and not file_path.name.startswith("."):
+                        files.append({
+                            "path": str(file_path.relative_to(self.project_dir)),
+                            "size": file_path.stat().st_size,
+                            "modified": datetime.fromtimestamp(
+                                file_path.stat().st_mtime
+                            ).isoformat()
+                        })
+            return files
+
         for pattern in patterns:
-            for file_path in self.project_dir.glob(pattern):
+            for file_path in input_base.glob(pattern):
                 if file_path.is_file():
                     files.append({
                         "path": str(file_path.relative_to(self.project_dir)),
@@ -466,24 +483,12 @@ class ContextManager:
                             file_path.stat().st_mtime
                         ).isoformat()
                     })
-        
+
         return files
     
     def _get_input_directories(self, stage: str) -> List[str]:
-        """获取阶段的输入目录"""
-        # 直接定义输入映射，避免循环导入
-        input_map = {
-            "requirement": "input/",
-            "design": "output/requirements/",
-            "development": "output/design/",
-            "testing": "output/src/",
-            "deployment": "output/tests/",
-            "operations": "output/deploy/",
-            "monitor": "output/",
-            "optimizer": "output/monitor/"
-        }
-        input_dir = input_map.get(stage, "input/")
-        return [str(self.project_dir / input_dir)]
+        """获取阶段的输入目录（从 config.yaml 读取）"""
+        return [str(self.state.get_input_dir(stage))]
     
     def _get_output_requirements(self, stage: str) -> dict:
         """获取阶段的输出要求"""
@@ -682,21 +687,9 @@ class ContextManager:
         return notes.get(stage, "- 按照最佳实践执行")
     
     def _get_output_dir(self, stage: str) -> Path:
-        """获取阶段输出目录"""
-        # 直接定义输出映射，避免循环导入
-        output_map = {
-            "requirement": "output/requirements/",
-            "design": "output/design/",
-            "development": "output/src/",
-            "testing": "output/tests/",
-            "deployment": "output/deploy/",
-            "operations": "output/operations/",
-            "monitor": "output/monitor/",
-            "optimizer": "output/optimizer/"
-        }
-        output_dir = output_map.get(stage, f"output/{stage}/")
-        return self.project_dir / output_dir
-    
+        """获取阶段输出目录（从 config.yaml 读取）"""
+        return self.state.get_output_dir(stage)
+
     def _infer_phase(self, stage: str) -> str:
         """从阶段名称推断 PDCA 阶段"""
         phase_map = {
@@ -765,7 +758,7 @@ class ContextManager:
             try:
                 data = json.loads(summary_file.read_text(encoding="utf-8"))
                 summary = data.get("summary", "")
-            except:
+            except (json.JSONDecodeError, IOError, OSError):
                 pass
         
         # 如果没有摘要文件，尝试从主要文档提取

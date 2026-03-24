@@ -8,7 +8,7 @@ from .models import (
     ModuleDependencyAnalyzer, get_subtasks_for_project, generate_development_subtasks
 )
 from .executors import InputAnalyzer, SubtaskExecutor, SubagentExecutor
-from .state import WorkflowState
+from .state_facade import WorkflowFacade
 
 __all__ = [
     # 数据类
@@ -32,6 +32,6 @@ __all__ = [
     'InputAnalyzer',
     'SubtaskExecutor',
     'SubagentExecutor',
-    # 状态
-    'WorkflowState',
+    # 状态门面（统一入口）
+    'WorkflowFacade',
 ]

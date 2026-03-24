@@ -465,7 +465,7 @@ class ModuleDependencyAnalyzer:
                                 dependencies[source]["reasons"].append(
                                     f"{rule['name']}: {match.group(0)}"
                                 )
-                        except:
+                        except (AttributeError, IndexError):
                             continue
         
         # 转换为列表
