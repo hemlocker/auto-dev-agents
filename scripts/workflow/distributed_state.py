@@ -712,3 +712,141 @@ class DistributedStateManager:
                 print(f"   {status_emoji.get(sub.status, '❓')} {name}{duration}")
         
         print("\n" + "=" * 60)
+    
+    # ========== 版本化管理 ==========
+    
+    def get_versioned_incremental_plan(self, stages_to_run: List[str] = None) -> Dict[str, Any]:
+        """获取版本化增量执行计划
+        
+        Args:
+            stages_to_run: 指定要运行阶段（None 表示检测所有阶段）
+        
+        Returns:
+            {
+                "mode": "full" | "incremental" | "none",
+                "reason": str,
+                "stages_to_run": [str, ...],
+                "pending_versions": [str, ...],
+                "new_requirements": [Requirement, ...],
+                "stats": {...}
+            }
+        """
+        # 获取所有版本
+        all_versions = self.csv_parser.get_all_versions()
+        
+        if not all_versions:
+            return {
+                "mode": "none",
+                "reason": "无版本数据",
+                "stages_to_run": [],
+                "pending_versions": [],
+                "new_requirements": [],
+                "stats": {}
+            }
+        
+        # 获取已处理的版本
+        processed = self.manifest_manager.get_processed_versions()
+        
+        # 找出待处理版本
+        pending_versions = [v for v in all_versions if v not in processed]
+        
+        if not pending_versions:
+            return {
+                "mode": "none",
+                "reason": "所有版本已处理",
+                "stages_to_run": [],
+                "pending_versions": [],
+                "new_requirements": [],
+                "stats": {}
+            }
+        
+        # 获取待处理版本的需求
+        new_requirements = []
+        for version in pending_versions:
+            reqs = self.csv_parser.parse_requirements(version)
+            new_requirements.extend(reqs)
+        
+        # 统计
+        by_priority = {}
+        for req in new_requirements:
+            p = req.priority or "Unknown"
+            by_priority[p] = by_priority.get(p, 0) + 1
+        
+        stats = {
+            "new_requirements": len(new_requirements),
+            "by_priority": by_priority
+        }
+        
+        # 确定执行模式
+        if not processed:
+            # 首次运行，全量执行
+            mode = "full"
+            reason = "首次运行"
+        else:
+            # 增量执行
+            mode = "incremental"
+            reason = f"检测到 {len(pending_versions)} 个新版本"
+        
+        # 确定要运行的阶段
+        if stages_to_run:
+            affected_stages = stages_to_run
+        else:
+            affected_stages = self.ALL_STAGES
+        
+        return {
+            "mode": mode,
+            "reason": reason,
+            "stages_to_run": affected_stages,
+            "pending_versions": pending_versions,
+            "new_requirements": new_requirements,
+            "stats": stats
+        }
+    
+    def record_version_processed(self, version: str, requirements_added: int = 0):
+        """记录版本已处理
+        
+        Args:
+            version: 版本号
+            requirements_added: 新增需求数量
+        """
+        self.manifest_manager.record_version_processed(
+            version=version,
+            input_files=[f.name for f in self.input_dir.glob("feedback/*.csv")],
+            requirements_added=requirements_added
+        )
+    
+    def reset_version_state(self):
+        """重置版本状态"""
+        self.manifest_manager.reset()
+        print("✅ 版本状态已重置")
+    
+    def print_version_status(self):
+        """打印版本状态"""
+        all_versions = self.csv_parser.get_all_versions()
+        processed = self.manifest_manager.get_processed_versions()
+        pending = [v for v in all_versions if v not in processed]
+        
+        print(f"\n📋 所有版本: {all_versions}")
+        print(f"✅ 已处理: {processed}")
+        print(f"⏳ 待处理: {pending}")
+        
+        if pending:
+            print(f"\n📊 待处理需求统计:")
+            for version in pending:
+                reqs = self.csv_parser.parse_requirements(version)
+                by_priority = {}
+                for req in reqs:
+                    p = req.priority or "Unknown"
+                    by_priority[p] = by_priority.get(p, 0) + 1
+                print(f"   {version}: {len(reqs)} 项需求")
+                if by_priority:
+                    print(f"      优先级: {by_priority}")
+        
+        # 显示清单统计
+        stats = self.manifest_manager.get_stats()
+        if stats.get("total_versions", 0) > 0:
+            print(f"\n📈 累计统计:")
+            print(f"   已处理版本: {stats['total_versions']}")
+            print(f"   总需求: {stats['total_requirements']}")
+        
+        print("\n" + "=" * 60)
