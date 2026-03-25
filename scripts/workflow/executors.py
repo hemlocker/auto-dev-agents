@@ -291,8 +291,8 @@ class InputAnalyzer:
 
         # 扫描字符做统计（采样前 max_sample_mb MB）
         max_sample = (self.config.get("token_estimation", {}).get("max_sample_mb", 2) * 1024 * 1024)
-        cjk_threshold = (self.config.get("token_estimation", {}).get("cjk_ratio_threshold", 0.15)
-        mixed_threshold = (self.config.get("token_estimation", {}).get("mixed_ratio_threshold", 0.02)
+        cjk_threshold = (self.config.get("token_estimation", {}).get("cjk_ratio_threshold", 0.15))
+        mixed_threshold = (self.config.get("token_estimation", {}).get("mixed_ratio_threshold", 0.02))
 
         cjk_count = 0
         latin_count = 0

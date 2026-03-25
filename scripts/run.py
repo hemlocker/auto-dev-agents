@@ -699,7 +699,7 @@ class WorkflowExecutor:
                         max_wait=self.config["engine"].get("wait_active_first_seconds", 60)):
                     print(f"   ⚠️ 存在活跃子智能体，强制等待...")
                     self._wait_for_no_active_subagents(
-                        max_wait=self.config["engine"].get("wait_active_max_seconds", 300)):
+                        max_wait=self.config["engine"].get("wait_active_max_seconds", 300))
             # 标记子任务开始
             subtask_start = time.time()
             self.facade.start_subtask(stage, subtask_name)
@@ -1250,11 +1250,10 @@ def main():
         result["stages"] = [s.name for s in executor.stages]
         print(json.dumps(result, indent=2, ensure_ascii=False))
         
-        # 打印断点续传状态（受 --quiet 控制）
-        logger.info("")
-        logger.info("=" * 60)
-        logger.info("📊 断点续传状态")
-        logger.info("=" * 60)
+        # 打印断点续传状态
+        print("\n" + "=" * 60)
+        print("📊 断点续传状态")
+        print("=" * 60)
         executor.facade.print_status(
             stage=args.stages.split(",")[0] if args.stages else None
         )

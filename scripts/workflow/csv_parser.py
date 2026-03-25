@@ -109,7 +109,8 @@ class CSVInputParser:
                     versions.append(version)
         
         # 按版本号排序
-        versions.sort(key=version_sort_key)
+        from .revision_history import version_sort_key
+        versions.sort(key=lambda v: version_sort_key(v.version))
         
         self._versions_cache = versions
         return versions
